@@ -980,6 +980,26 @@ const remoteNote = (over = {}) => ({
     );
   }
 
+  {
+    const css = read('sidepanel.css');
+    const rule = css.match(/\.note-body img[\s\S]*?\}/)[0];
+    assert.ok(
+      /height:\s*auto/.test(rule),
+      'width/height 속성을 박아두고 height:auto 가 없으면 큰 사진이 찌그러진다'
+    );
+    assert.ok(/max-width:\s*100%/.test(rule), '가로는 말풍선을 넘지 않는다');
+    assert.ok(/\.note-body video/.test(rule), '영상도 같은 규칙을 받아야 한다');
+    // 뒤에 오는 규칙이 이기므로, 나중에 video 를 다시 선언하면서 height 를 빼면 안 된다
+    const later = css.slice(css.indexOf(rule) + rule.length);
+    const overrides = later.match(/\.note-body video[^{]*\{[^}]*\}/g) || [];
+    overrides.forEach((block) => {
+      assert.ok(
+        !/max-width|height/.test(block),
+        `나중 규칙이 크기를 다시 덮어쓴다: ${block.replace(/\s+/g, ' ')}`
+      );
+    });
+  }
+
   console.log('ok — 모든 체크 통과');
 })().catch((err) => {
   console.error(err);

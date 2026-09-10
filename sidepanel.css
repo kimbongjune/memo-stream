@@ -366,8 +366,10 @@ html, body {
 .note-body pre code { background: none; padding: 0; }
 .note-body a { color: var(--accent); text-decoration: none; }
 .note-body a:hover { text-decoration: underline; }
-.note-body img {
+.note-body img,
+.note-body video {
   max-width: 100%;
+  height: auto;
   border-radius: 8px;
   display: block;
   margin: 0.5em 0;
@@ -396,13 +398,7 @@ html, body {
 .note-body .media-save:focus { opacity: 1; }
 .note-body .media-save:hover { background: rgba(0, 0, 0, 0.85); }
 
-.note-body video {
-  max-width: 100%;
-  border-radius: 8px;
-  display: block;
-  margin: 0.5em 0;
-  background: #000;
-}
+.note-body video { background: #000; }
 .note-body table { border-collapse: collapse; margin: 0.5em 0; }
 .note-body th, .note-body td { border: 1px solid var(--border); padding: 4px 8px; }
 .note-body mark { background: var(--mark-bg); color: var(--mark-fg); border-radius: 3px; padding: 0 2px; }
