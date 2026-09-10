@@ -1052,6 +1052,48 @@ const startEdit = (note) => {
   textarea.value = split.text;
   body.appendChild(textarea);
 
+  const editTarget = {
+    input: textarea,
+    push: (ref) => {
+      refs = [...refs, ref];
+    },
+    refresh: drawStrip,
+  };
+  textarea.addEventListener('keydown', (event) => {
+    if (handleEditorKeys(textarea, event)) {
+      return;
+    }
+    if (event.key !== 'Enter') {
+      return;
+    }
+    const composing = event.isComposing || event.keyCode === 229;
+    const sendMode = state.settings.enterBehavior === 'send';
+    const wantSave = sendMode ? !event.shiftKey : event.shiftKey;
+    if (wantSave) {
+      event.preventDefault();
+      if (!composing) {
+        commit();
+      }
+      return;
+    }
+    handleEditorEnter(textarea, event);
+  });
+  textarea.addEventListener('paste', (event) => handleComposerPaste(textarea, event, editTarget));
+  textarea.addEventListener('drop', (event) => {
+    const files = filesFromDataTransfer(event.dataTransfer);
+    if (files.length > 0) {
+      event.preventDefault();
+      attachFiles(files, editTarget);
+    }
+  });
+  textarea.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  });
+  textarea.addEventListener('dragenter', (event) => {
+    event.preventDefault();
+  });
+
   const actions = document.createElement('div');
   actions.className = 'note-edit-actions';
 
@@ -1064,10 +1106,7 @@ const startEdit = (note) => {
     }
   });
 
-  const save = document.createElement('button');
-  save.className = 'btn primary';
-  save.textContent = '저장';
-  save.addEventListener('click', async () => {
+  const commit = async () => {
     const content = joinAttachments(textarea.value, refs);
     const blobIds = collectBlobIds(content);
     await updateNote(note.id, { content, blobIds, editedAt: Date.now() });
@@ -1080,7 +1119,12 @@ const startEdit = (note) => {
     await endEdit();
     await renderNotes();
     syncSoon();
-  });
+  };
+
+  const save = document.createElement('button');
+  save.className = 'btn primary';
+  save.textContent = '저장';
+  save.addEventListener('click', commit);
 
   actions.append(cancel, save);
   body.appendChild(actions);
@@ -1393,9 +1437,11 @@ const storeAttachment = async (file, status) => {
   return { id, md: `[${label}](blob:${id})` };
 };
 
-const attachFiles = async (files) => {
+const attachFiles = async (files, target = null) => {
   const status = $('#input-status');
-  const input = $('#note-input');
+  const input = target ? target.input : $('#note-input');
+  const push = target ? target.push : (ref) => state.draftRefs.push(ref);
+  const refresh = target ? target.refresh : renderDraftChips;
   status.classList.remove('hidden');
   let done = 0;
   let skipped = 0;
@@ -1410,7 +1456,7 @@ const attachFiles = async (files) => {
       continue;
     }
     try {
-      state.draftRefs.push(await storeAttachment(file, status));
+      push(await storeAttachment(file, status));
       done++;
     } catch (err) {
       console.error('attachFiles failed', file && file.name, err);
@@ -1419,40 +1465,59 @@ const attachFiles = async (files) => {
     }
   }
 
-  await renderDraftChips();
+  await refresh();
   input.focus();
   status.textContent = skipped > 0 ? lastProblem : `첨부 ${done}개 저장됨`;
   setTimeout(() => status.classList.add('hidden'), skipped > 0 ? 2500 : 1500);
 };
 
-const handleComposerKeydown = (input, event) => {
+const handleEditorKeys = (input, event) => {
   const mod = event.metaKey || event.ctrlKey;
 
   if (mod && !event.shiftKey && event.key.toLowerCase() === 'b') {
     event.preventDefault();
     toggleWrap(input, '**');
-    return;
+    return true;
   }
   if (mod && !event.shiftKey && event.key.toLowerCase() === 'i') {
     event.preventDefault();
     toggleWrap(input, '*');
-    return;
+    return true;
   }
   if (mod && !event.shiftKey && event.key.toLowerCase() === 'k') {
     event.preventDefault();
     insertLink(input);
-    return;
+    return true;
   }
   if (event.key === 'Escape') {
     input.blur();
-    return;
+    return true;
   }
   if (event.key === 'Tab') {
     if (!input.value) {
-      return;
+      return true;
     }
     event.preventDefault();
     indentLines(input, event.shiftKey ? -1 : 1);
+    return true;
+  }
+  return false;
+};
+
+const handleEditorEnter = (input, event) => {
+  if (event.key !== 'Enter') {
+    return;
+  }
+  if (event.isComposing || event.keyCode === 229) {
+    return;
+  }
+  if (handleListEnter(input)) {
+    event.preventDefault();
+  }
+};
+
+const handleComposerKeydown = (input, event) => {
+  if (handleEditorKeys(input, event)) {
     return;
   }
   if (event.key !== 'Enter') {
@@ -1470,15 +1535,10 @@ const handleComposerKeydown = (input, event) => {
     }
     return;
   }
-  if (composing) {
-    return;
-  }
-  if (handleListEnter(input)) {
-    event.preventDefault();
-  }
+  handleEditorEnter(input, event);
 };
 
-const handleComposerPaste = (input, event) => {
+const handleComposerPaste = (input, event, target = null) => {
   const dataTransfer = event.clipboardData;
   if (!dataTransfer) {
     return;
@@ -1489,12 +1549,12 @@ const handleComposerPaste = (input, event) => {
 
   if (images.length > 0) {
     event.preventDefault();
-    attachFiles(images);
+    attachFiles(images, target);
     return;
   }
   if (files.length > 0 && !text.trim()) {
     event.preventDefault();
-    attachFiles(files);
+    attachFiles(files, target);
     return;
   }
 

@@ -668,7 +668,7 @@ const remoteNote = (over = {}) => ({
     );
     assert.ok(/NOTE_PAGE_SIZE/.test(panel), '메모 목록은 페이지 단위로 그린다');
     assert.ok(
-      /if \(!input\.value\) \{\n\s*return;/.test(panel),
+      /if \(!input\.value\) \{\n\s*return true;/.test(panel),
       '빈 작성창에서는 Tab 이 포커스를 넘겨야 한다'
     );
     assert.ok(/select\.selectedIndex < 0/.test(panel), 'option 이 없으면 빈칸으로 두지 않는다');
@@ -999,6 +999,46 @@ const remoteNote = (over = {}) => ({
         `나중 규칙이 크기를 다시 덮어쓴다: ${block.replace(/\s+/g, ' ')}`
       );
     });
+  }
+
+  {
+    const editBody = fnBody(sources.sidepanel, 'startEdit');
+    assert.ok(
+      /textarea\.addEventListener\('keydown'/.test(editBody),
+      '편집창에도 굵게·기울임·링크·Tab 이 있어야 한다'
+    );
+    assert.ok(
+      /handleEditorKeys\(textarea, event\)/.test(editBody),
+      '작성창과 같은 키 처리를 쓴다'
+    );
+    assert.ok(
+      /handleEditorEnter\(textarea, event\)/.test(editBody),
+      '목록을 이어쓰되 Enter 로 저장되지는 않는다'
+    );
+    assert.ok(
+      /const wantSave = sendMode \? !event\.shiftKey : event\.shiftKey/.test(editBody),
+      '편집 Enter 도 작성창과 같은 설정을 따른다'
+    );
+    assert.ok(
+      /commit\(\)/.test(editBody) && /save\.addEventListener\('click', commit\)/.test(editBody),
+      '버튼과 Enter 가 같은 저장 경로를 쓴다'
+    );
+    assert.ok(
+      !/sendNote/.test(editBody),
+      '편집 Enter 는 새 메모를 보내는 것이 아니라 이 메모를 저장한다'
+    );
+    assert.ok(
+      /handleComposerPaste\(textarea, event, editTarget\)/.test(editBody),
+      '편집 중에도 붙여넣기로 첨부한다'
+    );
+    assert.ok(
+      /attachFiles\(files, editTarget\)/.test(editBody),
+      '편집 중에도 끌어다 놓기로 첨부한다'
+    );
+    assert.ok(
+      /refs = \[\.\.\.refs, ref\]/.test(editBody),
+      '새 첨부는 작성창이 아니라 편집 중인 메모에 붙어야 한다'
+    );
   }
 
   console.log('ok — 모든 체크 통과');
