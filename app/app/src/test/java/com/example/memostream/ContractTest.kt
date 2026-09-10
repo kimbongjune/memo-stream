@@ -366,6 +366,36 @@ class ContractTest {
     }
 
     @Test
+    fun `첨부를 기기에 저장할 수 있다`() {
+        val actions = source("ui/MediaActions.kt")
+        assertTrue("다운로드 폴더에 넣는다", actions.contains("MediaStore.Downloads.EXTERNAL_CONTENT_URI"))
+        assertTrue("쓰는 동안 IS_PENDING", actions.contains("MediaStore.Downloads.IS_PENDING"))
+        assertTrue("구버전은 문서 선택으로", actions.contains("fun writeTo("))
+
+        val dialogs = source("ui/Dialogs.kt")
+        assertTrue("첨부 메뉴에 저장", dialogs.contains("\"저장\", onSave"))
+        assertTrue("뷰어에도 저장", source("ui/Media.kt").contains("contentDescription = \"저장\""))
+        assertTrue(
+            "길게 누르면 메뉴가 뜬다",
+            source("ui/NoteBubble.kt").contains("onLongClick = {")
+        )
+    }
+
+    @Test
+    fun `일반 파일은 확대 뷰어를 열지 않는다`() {
+        val body = source("MainActivity.kt")
+        assertTrue(
+            "이미지·영상만 뷰어로 간다",
+            body.contains("""record.mime.startsWith("image/") || record.mime.startsWith("video/")""")
+        )
+        assertTrue("그 외에는 메뉴", body.contains("mediaMenu = record"))
+        val bubble = source("ui/NoteBubble.kt")
+        val fileChip = bubble.substringAfter("else -> FileChip(").substringBefore("}\n                            }")
+        assertFalse("파일 조각이 뷰어를 열면 안 된다", fileChip.contains("onOpenMedia"))
+        assertTrue("파일 조각은 메뉴를 연다", fileChip.contains("onMediaMenu(record)"))
+    }
+
+    @Test
     fun `첨부는 클립보드에 파일로 올라간다`() {
         val body = source("ui/MediaActions.kt")
         assertTrue("텍스트가 아니라 URI 로 올려야 다른 앱이 붙여넣는다", body.contains("ClipData.newUri"))

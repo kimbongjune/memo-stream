@@ -6,7 +6,9 @@ import com.example.memostream.sync.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -66,6 +68,7 @@ fun domainOf(url: String): String = runCatching {
     java.net.URI(url).host?.removePrefix("www.") ?: url
 }.getOrDefault(url)
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun NoteBubble(
     note: Note,
@@ -75,6 +78,7 @@ fun NoteBubble(
     blobFile: (BlobRecord) -> File,
     thumbFile: (BlobRecord) -> File,
     onOpenMedia: (BlobRecord) -> Unit,
+    onMediaMenu: (BlobRecord) -> Unit,
     onLinkClick: (String) -> Unit,
     onMenu: () -> Unit,
 ) {
@@ -132,9 +136,15 @@ fun NoteBubble(
                                             Modifier
                                                 .fillMaxWidth()
                                                 .clip(mediaShape)
-                                        ) {
-                                            onOpenMedia(record)
-                                        }
+                                                .combinedClickable(
+                                                    onClick = {
+                                                        onOpenMedia(record)
+                                                    },
+                                                    onLongClick = {
+                                                        onMediaMenu(record)
+                                                    },
+                                                ),
+                                        )
 
                                     record.mime.startsWith("image/") ->
                                         BlobImage(
@@ -142,9 +152,14 @@ fun NoteBubble(
                                             Modifier
                                                 .fillMaxWidth()
                                                 .clip(mediaShape)
-                                                .clickable {
-                                                    onOpenMedia(record)
-                                                },
+                                                .combinedClickable(
+                                                    onClick = {
+                                                        onOpenMedia(record)
+                                                    },
+                                                    onLongClick = {
+                                                        onMediaMenu(record)
+                                                    },
+                                                ),
                                             ContentScale.FillWidth,
                                         )
 
@@ -155,7 +170,7 @@ fun NoteBubble(
                                         record.size,
                                         Modifier.fillMaxWidth(),
                                     ) {
-                                        onOpenMedia(record)
+                                        onMediaMenu(record)
                                     }
                                 }
                             }

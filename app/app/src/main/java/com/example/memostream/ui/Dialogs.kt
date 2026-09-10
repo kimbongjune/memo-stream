@@ -15,6 +15,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
@@ -84,6 +86,39 @@ private fun MenuItem(icon: ImageVector, label: String, onClick: () -> Unit, dang
     ) {
         Icon(icon, contentDescription = null, Modifier.size(18.dp), tint = tint)
         Text(label, Modifier.padding(start = 14.dp), color = tint)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MediaMenu(
+    record: BlobRecord,
+    onDismiss: () -> Unit,
+    onSave: () -> Unit,
+    onCopy: () -> Unit,
+    onShare: () -> Unit,
+    onOpen: () -> Unit,
+) {
+    BasicAlertDialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(MemoRadius),
+            color = memo.bg,
+            contentColor = memo.fg,
+            border = BorderStroke(1.dp, memo.border),
+        ) {
+            Column(Modifier.padding(vertical = 8.dp)) {
+                Text(
+                    suggestedName(record),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = memo.fgSoft,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                )
+                MenuItem(Icons.Default.Download, "저장", onSave)
+                MenuItem(Icons.Default.ContentCopy, "복사", onCopy)
+                MenuItem(Icons.Default.Share, "공유", onShare)
+                MenuItem(Icons.Default.OpenInNew, "다른 앱으로 열기", onOpen)
+            }
+        }
     }
 }
 

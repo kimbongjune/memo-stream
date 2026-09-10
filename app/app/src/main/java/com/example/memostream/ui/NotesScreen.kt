@@ -91,6 +91,7 @@ fun NotesScreen(
     draft: List<DraftRef>,
     composerText: String,
     onOpenMedia: (BlobRecord) -> Unit,
+    onMediaMenu: (BlobRecord) -> Unit,
     onLinkClick: (String) -> Unit,
     onNoteMenu: (Note) -> Unit,
     modifier: Modifier = Modifier,
@@ -168,6 +169,7 @@ fun NotesScreen(
                                 blobFile = state::blobFile,
                                 thumbFile = state::thumbFile,
                                 onOpenMedia = onOpenMedia,
+                                onMediaMenu = onMediaMenu,
                                 onLinkClick = onLinkClick,
                                 onMenu = {
                                     onNoteMenu(row.note)

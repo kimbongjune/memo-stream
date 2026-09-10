@@ -9,7 +9,9 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -91,6 +93,12 @@ fun MemoApp() {
 
     val theme by state.theme.collectAsState()
     var viewing by remember {
+        mutableStateOf<BlobRecord?>(null)
+    }
+    var mediaMenu by remember {
+        mutableStateOf<BlobRecord?>(null)
+    }
+    var savingRecord by remember {
         mutableStateOf<BlobRecord?>(null)
     }
     var menuNote by remember {
@@ -272,8 +280,15 @@ fun MemoApp() {
                             status = status,
                             draft = draft,
                             composerText = composerText,
-                            onOpenMedia = {
-                                viewing = it
+                            onOpenMedia = { record ->
+                                if (record.mime.startsWith("image/") || record.mime.startsWith("video/")) {
+                                    viewing = record
+                                } else {
+                                    mediaMenu = record
+                                }
+                            },
+                            onMediaMenu = { record ->
+                                mediaMenu = record
                             },
                             onLinkClick = { url ->
                                 runCatching {
@@ -298,6 +313,54 @@ fun MemoApp() {
             }
         }
 
+        val saver = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("*/*")
+        ) { target ->
+            val record = savingRecord
+            savingRecord = null
+            if (target != null && record != null) {
+                val ok = writeTo(context, state.blobFile(record), target)
+                state.showToast(if (ok) "저장했습니다" else "저장에 실패했습니다")
+            }
+        }
+
+        fun save(record: BlobRecord, file: java.io.File) {
+            if (saveToDownloads(context, record, file)) {
+                state.showToast("다운로드에 저장했습니다")
+            } else {
+                savingRecord = record
+                saver.launch(suggestedName(record))
+            }
+        }
+
+        mediaMenu?.let { record ->
+            val file = state.blobFile(record)
+            MediaMenu(
+                record = record,
+                onDismiss = {
+                    mediaMenu = null
+                },
+                onSave = {
+                    save(record, file)
+                    mediaMenu = null
+                },
+                onCopy = {
+                    if (!copyMedia(context, record, file)) {
+                        state.showToast("복사에 실패했습니다")
+                    }
+                    mediaMenu = null
+                },
+                onShare = {
+                    shareMedia(context, record, file, null)
+                    mediaMenu = null
+                },
+                onOpen = {
+                    openExternally(context, record, file)
+                    mediaMenu = null
+                },
+            )
+        }
+
         viewing?.let { record ->
             val file = state.blobFile(record)
             BackHandler {
@@ -308,6 +371,9 @@ fun MemoApp() {
                 file = file,
                 onClose = {
                     viewing = null
+                },
+                onSave = {
+                    save(record, file)
                 },
                 onCopy = {
                     if (!copyMedia(context, record, file)) {

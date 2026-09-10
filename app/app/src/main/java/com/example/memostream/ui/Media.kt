@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -99,8 +100,8 @@ private fun rememberPlayer(file: File, loop: Boolean, autoPlay: Boolean): ExoPla
 }
 
 @Composable
-fun VideoThumb(thumb: File?, duration: String?, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Box(modifier.clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+fun VideoThumb(thumb: File?, duration: String?, modifier: Modifier = Modifier) {
+    Box(modifier, contentAlignment = Alignment.Center) {
         if (thumb != null && thumb.exists()) {
             BlobImage(thumb, Modifier.fillMaxWidth())
         } else {
@@ -108,7 +109,7 @@ fun VideoThumb(thumb: File?, duration: String?, modifier: Modifier = Modifier, o
                 Modifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .background(memo.bgSoft)
             )
         }
         Box(
@@ -141,7 +142,7 @@ fun FileChip(name: String, size: Long, modifier: Modifier = Modifier, onClick: (
     Row(
         modifier
             .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .background(memo.bgSoft)
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -150,14 +151,14 @@ fun FileChip(name: String, size: Long, modifier: Modifier = Modifier, onClick: (
             Icons.Default.Description,
             contentDescription = null,
             modifier = Modifier.size(20.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            tint = memo.fgSoft,
         )
         Column(Modifier.padding(start = 10.dp)) {
             Text(name, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
             Text(
                 formatBytes(size),
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = memo.fgSoft,
             )
         }
     }
@@ -168,6 +169,7 @@ fun MediaViewer(
     record: BlobRecord,
     file: File,
     onClose: () -> Unit,
+    onSave: () -> Unit,
     onCopy: () -> Unit,
     onShare: () -> Unit,
     onOpen: () -> Unit,
@@ -190,6 +192,9 @@ fun MediaViewer(
                 .padding(8.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
+            IconButton(onClick = onSave) {
+                Icon(Icons.Default.Download, contentDescription = "저장", tint = Color.White)
+            }
             IconButton(onClick = onCopy) {
                 Icon(Icons.Default.ContentCopy, contentDescription = "복사", tint = Color.White)
             }
