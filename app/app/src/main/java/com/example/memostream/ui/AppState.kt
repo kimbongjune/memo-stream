@@ -12,6 +12,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.clearText
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.asStateFlow
@@ -161,8 +163,7 @@ class AppState(app: Application) : AndroidViewModel(app) {
     private val _draft = MutableStateFlow<List<DraftRef>>(emptyList())
     val draft: StateFlow<List<DraftRef>> = _draft.asStateFlow()
 
-    private val _composerText = MutableStateFlow("")
-    val composerText: StateFlow<String> = _composerText.asStateFlow()
+    val composer = TextFieldState()
 
     private val _status = MutableStateFlow<String?>(null)
     val status: StateFlow<String?> = _status.asStateFlow()
@@ -283,10 +284,6 @@ class AppState(app: Application) : AndroidViewModel(app) {
         _pageSize.value += NOTE_PAGE_SIZE
     }
 
-    fun setComposerText(text: String) {
-        _composerText.value = text
-    }
-
     suspend fun refresh() = Unit
 
     suspend fun defaultFolderId(): Long {
@@ -303,12 +300,12 @@ class AppState(app: Application) : AndroidViewModel(app) {
     }
 
     fun send() {
-        val text = _composerText.value
+        val text = composer.text.toString()
         val refs = _draft.value
         if (text.isBlank() && refs.isEmpty()) {
             return
         }
-        _composerText.value = ""
+        composer.clearText()
         _draft.value = emptyList()
         viewModelScope.launch {
             withContext(Dispatchers.IO) {

@@ -86,7 +86,6 @@ fun MemoApp() {
     val ui by state.ui.collectAsState()
     val trash by state.trash.collectAsState()
     val draft by state.draft.collectAsState()
-    val composerText by state.composerText.collectAsState()
     val status by state.status.collectAsState()
     val toast by state.toast.collectAsState()
     val syncing by state.syncing.collectAsState()
@@ -279,7 +278,6 @@ fun MemoApp() {
                             blobs = blobs,
                             status = status,
                             draft = draft,
-                            composerText = composerText,
                             onOpenMedia = { record ->
                                 if (record.mime.startsWith("image/") || record.mime.startsWith("video/")) {
                                     viewing = record

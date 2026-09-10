@@ -638,6 +638,15 @@ class ContractTest {
         val body = source("ui/NotesScreen.kt")
         assertTrue("붙여넣기를 받는다", body.contains(".contentReceiver {"))
         assertTrue(
+            "contentReceiver 는 state 기반 BasicTextField 의 붙여넣기 경로에만 연결된다",
+            body.contains("state = state.composer")
+        )
+        assertFalse(
+            "value/onValueChange 방식이면 텍스트 전용 경로로 빠져 수신기를 거치지 않는다",
+            body.contains("onValueChange = state::setComposerText")
+        )
+        assertTrue("작성창 상태는 TextFieldState", source("ui/AppState.kt").contains("val composer = TextFieldState()"))
+        assertTrue(
             "받은 것은 첨부 경로로 넘겨 압축을 똑같이 태운다",
             body.contains("state.attach(uris)")
         )

@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.Icons
@@ -91,7 +92,6 @@ fun NotesScreen(
     blobs: Map<Long, BlobRecord>,
     status: String?,
     draft: List<DraftRef>,
-    composerText: String,
     onOpenMedia: (BlobRecord) -> Unit,
     onMediaMenu: (BlobRecord) -> Unit,
     onLinkClick: (String) -> Unit,
@@ -182,7 +182,7 @@ fun NotesScreen(
                 }
             }
         }
-        Composer(state, draft, composerText, status)
+        Composer(state, draft, status)
     }
     }
 }
@@ -297,9 +297,9 @@ private fun SearchBar(search: SearchState, state: AppState) {
 private fun Composer(
     state: AppState,
     draft: List<DraftRef>,
-    text: String,
     status: String?,
 ) {
+    val text = state.composer.text
     val context = LocalContext.current
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -367,17 +367,26 @@ private fun Composer(
                 Icon(Icons.Default.Add, contentDescription = "첨부", tint = memo.fgSoft)
             }
             BasicTextField(
-                value = text,
-                onValueChange = state::setComposerText,
+                state = state.composer,
                 modifier = Modifier
                     .weight(1f)
                     .padding(horizontal = 8.dp)
                     .heightIn(min = 42.dp, max = 160.dp)
                     .clip(RoundedCornerShape(MemoRadius))
-                    .background(if (focused) memo.bg else memo.bgSoft)
+                    .background(
+                        if (focused) {
+                            memo.bg
+                        } else {
+                            memo.bgSoft
+                        }
+                    )
                     .border(
                         1.dp,
-                        if (focused) memo.accent else memo.border,
+                        if (focused) {
+                            memo.accent
+                        } else {
+                            memo.border
+                        },
                         RoundedCornerShape(MemoRadius),
                     )
                     .onFocusChanged {
@@ -398,7 +407,8 @@ private fun Composer(
                     .padding(horizontal = 12.dp, vertical = 11.dp),
                 textStyle = MaterialTheme.typography.bodyMedium.copy(color = memo.fg),
                 cursorBrush = SolidColor(memo.accent),
-                decorationBox = { inner ->
+                lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = 6),
+                decorator = { inner ->
                     if (text.isEmpty()) {
                         Text(
                             "메모를 적으세요",
