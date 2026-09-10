@@ -4,15 +4,39 @@ import com.example.memostream.data.*
 
 import android.content.ClipData
 import android.content.ContentValues
-import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import java.io.File
+
+private val PASTEABLE_IMAGES = setOf("image/jpeg", "image/png", "image/gif")
+
+private fun clipboardCopy(context: Context, record: BlobRecord, source: File): Pair<Uri, String> {
+    if (!record.mime.startsWith("image/") || record.mime in PASTEABLE_IMAGES) {
+        return shareableUri(context, record, source) to record.mime
+    }
+    val dir = File(context.cacheDir, "shared")
+    if (!dir.exists()) {
+        dir.mkdirs()
+    }
+    val target = File(dir, "${record.sha256.take(16)}.png")
+    if (!target.exists()) {
+        val bitmap = BitmapFactory.decodeFile(source.absolutePath)
+            ?: return shareableUri(context, record, source) to record.mime
+        target.outputStream().use { output ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+        }
+        bitmap.recycle()
+    }
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", target)
+    return uri to "image/png"
+}
 
 private fun shareableUri(context: Context, record: BlobRecord, source: File): Uri {
     val dir = File(context.cacheDir, "shared").apply {
@@ -29,25 +53,30 @@ private fun shareableUri(context: Context, record: BlobRecord, source: File): Ur
     return FileProvider.getUriForFile(context, "${context.packageName}.files", target)
 }
 
+fun copyText(context: Context, text: String): Boolean {
+    if (text.isBlank()) {
+        return false
+    }
+    return runCatching {
+        val clip = ClipData.newPlainText("메모", text)
+        context.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
+        true
+    }.onFailure { error ->
+        android.util.Log.w("memostream", "복사 실패", error)
+    }.getOrDefault(false)
+}
+
 fun copyMedia(context: Context, record: BlobRecord, file: File): Boolean {
     if (!file.exists()) {
         return false
     }
     return runCatching {
-        val uri = shareableUri(context, record, file)
+        val (uri, _) = clipboardCopy(context, record, file)
         val label = record.name.ifEmpty {
             "첨부"
         }
 
-        val clip = ClipData(
-            ClipDescription(label, arrayOf(record.mime, "text/plain")),
-            ClipData.Item(uri),
-        )
-        context.grantUriPermission(
-            "android",
-            uri,
-            Intent.FLAG_GRANT_READ_URI_PERMISSION,
-        )
+        val clip = ClipData.newUri(context.contentResolver, label, uri)
         context.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
         true
     }.onFailure {

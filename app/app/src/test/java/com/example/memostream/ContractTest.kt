@@ -396,10 +396,28 @@ class ContractTest {
     }
 
     @Test
-    fun `첨부는 클립보드에 파일로 올라간다`() {
+    fun `복사는 종류에 따라 다르게 담는다`() {
         val body = source("ui/MediaActions.kt")
-        assertTrue("텍스트가 아니라 URI 로 올려야 다른 앱이 붙여넣는다", body.contains("ClipData.newUri"))
+        assertTrue("글은 평문으로", body.contains("ClipData.newPlainText"))
+        assertTrue("첨부는 URI 로", body.contains("ClipData.newUri"))
+        assertFalse(
+            "설명에 text/plain 을 끼우면 받는 앱이 이미지가 아니라 글로 붙여넣는다",
+            body.contains("\"text/plain\"")
+        )
+        assertFalse("MIME 을 직접 지어내지 않는다", body.contains("ClipDescription("))
+        assertTrue(
+            "글이 있으면 글, 첨부만 있으면 첨부",
+            source("MainActivity.kt").contains("if (split.text.isBlank() && media != null)")
+        )
         assertTrue("FileProvider 로 내보낸다", body.contains("FileProvider.getUriForFile"))
+        assertTrue(
+            "webp 는 붙여넣기를 받는 앱이 드물어 클립보드용으로만 png 를 만든다",
+            body.contains("PASTEABLE_IMAGES") && body.contains("Bitmap.CompressFormat.PNG")
+        )
+        assertTrue(
+            "영상과 일반 파일은 원본 그대로 올린다",
+            body.contains("""if (!record.mime.startsWith("image/") || record.mime in PASTEABLE_IMAGES)""")
+        )
         val manifest = File("src/main/AndroidManifest.xml").readText()
         assertTrue("provider 선언", manifest.contains("androidx.core.content.FileProvider"))
         assertTrue("경로 설정", File("src/main/res/xml/file_paths.xml").exists())

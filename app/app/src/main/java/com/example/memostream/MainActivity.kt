@@ -409,19 +409,13 @@ fun MemoApp() {
                 },
                 onCopy = {
                     val split = splitAttachments(note.content)
-                    val media = split.refs.firstNotNullOfOrNull {
-                        blobs[it.id]
+                    val media = split.refs.firstNotNullOfOrNull { ref ->
+                        blobs[ref.id]
                     }
-                    val ok = when {
-                        media != null && split.text.isBlank() ->
-                            copyMedia(context, media, state.blobFile(media))
-                        else -> {
-                            context.getSystemService(android.content.ClipboardManager::class.java)
-                                .setPrimaryClip(
-                                    android.content.ClipData.newPlainText("memo", split.text)
-                                )
-                            true
-                        }
+                    val ok = if (split.text.isBlank() && media != null) {
+                        copyMedia(context, media, state.blobFile(media))
+                    } else {
+                        copyText(context, split.text)
                     }
                     if (!ok) {
                         state.showToast("복사에 실패했습니다")
