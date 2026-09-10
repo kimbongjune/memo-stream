@@ -796,6 +796,190 @@ const remoteNote = (over = {}) => ({
     );
   }
 
+  {
+    const makeRealtime = (initialConf) => {
+      let conf = initialConf;
+      const calls = { syncSoon: 0, syncNow: 0 };
+      const timers = [];
+      const intervals = [];
+      class FakeSocket {
+        constructor(url) {
+          this.url = url;
+          this.readyState = 1;
+          this.sent = [];
+          this.handlers = {};
+          this.closed = false;
+          FakeSocket.last = this;
+        }
+        addEventListener(type, fn) {
+          (this.handlers[type] = this.handlers[type] || []).push(fn);
+        }
+        send(raw) {
+          this.sent.push(JSON.parse(raw));
+        }
+        close() {
+          this.closed = true;
+          this.readyState = 3;
+          this.fire('close');
+        }
+        fire(type, event) {
+          for (const fn of this.handlers[type] || []) {
+            fn(event);
+          }
+        }
+      }
+      FakeSocket.OPEN = 1;
+
+      const api = new Function(
+        'WebSocket',
+        'syncConf',
+        'syncSoon',
+        'syncNow',
+        'console',
+        'setTimeout',
+        'clearTimeout',
+        'setInterval',
+        'clearInterval',
+        read('realtime.js') + '\nreturn { rtConnect, rtStop, rtAlive };'
+      )(
+        FakeSocket,
+        () => conf,
+        () => {
+          calls.syncSoon++;
+        },
+        async () => {
+          calls.syncNow++;
+        },
+        { warn() {}, debug() {} },
+        (fn, ms) => {
+          timers.push({ fn, ms });
+          return timers.length;
+        },
+        () => {},
+        (fn, ms) => {
+          intervals.push({ fn, ms });
+          return intervals.length;
+        },
+        () => {}
+      );
+      return {
+        api,
+        calls,
+        timers,
+        intervals,
+        socket: () => FakeSocket.last,
+        setConf: (next) => {
+          conf = next;
+        },
+      };
+    };
+
+    const conf = { url: 'https://abcdef.supabase.co', key: 'service-key' };
+
+    {
+      const rt = makeRealtime(conf);
+      rt.api.rtConnect();
+      const socket = rt.socket();
+
+      assert.ok(
+        socket.url.startsWith('wss://abcdef.supabase.co/realtime/v1/websocket?'),
+        'https 프로젝트 주소를 wss 로 바꿔 붙는다'
+      );
+      assert.ok(socket.url.includes('apikey=service-key'), 'apikey 를 붙여야 서버가 받아준다');
+
+      socket.fire('open');
+      const join = socket.sent.find((frame) => frame.event === 'phx_join');
+      assert.ok(join, '열리면 채널에 조인한다');
+      assert.deepStrictEqual(
+        join.payload.config.postgres_changes.map((change) => change.table),
+        ['folders', 'notes', 'purges'],
+        '세 테이블 변경을 모두 구독한다'
+      );
+      assert.strictEqual(join.payload.access_token, 'service-key', '토큰을 실어야 인가된다');
+      assert.strictEqual(rt.intervals[0].ms, 30000, '30초마다 heartbeat 를 보낸다');
+
+      rt.intervals[0].fn();
+      assert.ok(
+        socket.sent.some((frame) => frame.event === 'heartbeat'),
+        'heartbeat 가 실제로 나가야 죽은 연결을 안 붙들고 있는다'
+      );
+
+      assert.strictEqual(rt.calls.syncNow, 0, '조인 응답 전에는 당겨오지 않는다');
+      socket.fire('message', {
+        data: JSON.stringify({ event: 'phx_reply', topic: join.topic, payload: { status: 'ok' } }),
+      });
+      assert.strictEqual(
+        rt.calls.syncNow,
+        1,
+        '조인에 성공하면 끊겨 있던 동안 밀린 것을 한 번 당겨와야 한다'
+      );
+
+      socket.fire('message', {
+        data: JSON.stringify({ event: 'postgres_changes', payload: { data: {} } }),
+      });
+      assert.strictEqual(rt.calls.syncSoon, 1, '변경 알림은 동기화를 부르는 계기일 뿐이다');
+      assert.strictEqual(rt.api.rtAlive(), true, '열려 있으면 살아 있다고 봐야 한다');
+    }
+
+    {
+      const rt = makeRealtime(conf);
+      rt.api.rtConnect();
+      const first = rt.socket();
+      first.fire('open');
+      first.fire('close');
+
+      assert.strictEqual(rt.timers.length, 1, '끊기면 다시 붙을 예약을 건다');
+      assert.strictEqual(rt.timers[0].ms, 1000, '첫 재시도는 짧게');
+      rt.timers[0].fn();
+      assert.notStrictEqual(rt.socket(), first, '예약이 돌면 새로 붙는다');
+      rt.socket().fire('close');
+      assert.strictEqual(rt.timers[1].ms, 2000, '연달아 실패하면 간격을 늘린다');
+    }
+
+    {
+      const rt = makeRealtime(conf);
+      rt.api.rtConnect();
+      rt.socket().fire('open');
+      rt.api.rtStop();
+      assert.strictEqual(rt.socket().closed, true, '끄면 소켓을 닫는다');
+      rt.socket().fire('close');
+      assert.strictEqual(rt.timers.length, 0, '내가 끈 것이면 다시 붙지 않는다');
+    }
+
+    {
+      const rt = makeRealtime(null);
+      rt.api.rtConnect();
+      assert.strictEqual(rt.socket(), undefined, '동기화가 꺼져 있으면 붙지 않는다');
+    }
+
+    {
+      const rt = makeRealtime(conf);
+      rt.api.rtConnect();
+      rt.socket().fire('open');
+      rt.setConf(null);
+      rt.api.rtConnect();
+      assert.strictEqual(
+        rt.socket().closed,
+        true,
+        '동기화를 끄거나 연결을 해제했으면 붙어 있던 소켓도 끊어야 한다'
+      );
+      assert.strictEqual(rt.api.rtAlive(), false, '끊었으면 살아 있다고 하면 안 된다');
+    }
+
+    assert.ok(
+      /alter publication supabase_realtime set table/.test(sources.supabase),
+      'publication 에 테이블을 넣지 않으면 아무 변경도 흘러나오지 않는다'
+    );
+    assert.ok(
+      !/alter publication supabase_realtime add table/.test(sources.supabase),
+      'add table 은 이미 들어 있으면 에러라 두 번째 PC 에서 터진다'
+    );
+    assert.ok(
+      /<script src="realtime\.js">/.test(sources.html),
+      'realtime.js 를 불러와야 한다'
+    );
+  }
+
   console.log('ok — 모든 체크 통과');
 })().catch((err) => {
   console.error(err);

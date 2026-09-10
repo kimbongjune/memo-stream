@@ -71,6 +71,8 @@ alter table folders enable row level security;
 alter table notes   enable row level security;
 alter table purges  enable row level security;
 
+alter publication supabase_realtime set table folders, notes, purges;
+
 notify pgrst, 'reload schema';
 `;
 

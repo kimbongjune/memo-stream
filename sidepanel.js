@@ -1844,6 +1844,7 @@ const renderSyncSection = () => {
         );
         state.settings.sb = { ...provisioned, enabled: true };
         await saveSettings();
+        rtConnect();
         if (dbPass) {
           await showDialog({
             title: '데이터베이스 비밀번호',
@@ -1889,6 +1890,11 @@ const renderSyncSection = () => {
         async (value) => {
           state.settings.sb.enabled = value === 'on';
           await saveSettings();
+          if (state.settings.sb.enabled) {
+            rtConnect();
+          } else {
+            rtStop();
+          }
           await renderSettings();
         }
       )
@@ -1957,6 +1963,7 @@ const renderSyncSection = () => {
     }
     delete state.settings.sb;
     await saveSettings();
+    rtStop();
     await renderSettings();
   });
 
@@ -2315,10 +2322,17 @@ const bindEvents = () => {
 
 const bindSyncTriggers = () => {
   syncNow().catch(() => {});
+  rtConnect();
 
   window.addEventListener('focus', () => {
     const conf = state.settings.sb;
-    if (conf && Date.now() - (conf.lastSyncedAt || 0) > 60000) {
+    if (!conf) {
+      return;
+    }
+    if (!rtAlive()) {
+      rtConnect();
+    }
+    if (Date.now() - (conf.lastSyncedAt || 0) > 60000) {
       syncNow().catch(() => {});
     }
   });
