@@ -1,3 +1,12 @@
 .DS_Store
 task.md
 STORE.md
+
+app/local.properties
+app/.gradle/
+app/.idea/
+app/.kotlin/
+app/build/
+app/*/build/
+app/captures/
+*.iml
