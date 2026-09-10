@@ -62,6 +62,18 @@ class Settings(context: Context) {
             }
         }.apply()
 
+    var lastFolderId: Long?
+        get() = prefs.getLong("lastFolderId", -1L).takeIf {
+            it >= 0
+        }
+        set(value) = prefs.edit().apply {
+            if (value == null) {
+                remove("lastFolderId")
+            } else {
+                putLong("lastFolderId", value)
+            }
+        }.apply()
+
     var theme: String
         get() = prefs.getString("theme", "system") ?: "system"
         set(value) = prefs.edit().putString("theme", value).apply()

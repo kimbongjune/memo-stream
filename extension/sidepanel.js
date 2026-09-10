@@ -17,6 +17,7 @@ const state = {
     theme: 'system',
     onboarded: false,
     lastExportAt: null,
+    lastFolderId: null,
   },
   draftRefs: [],
   pageSize: NOTE_PAGE_SIZE,
@@ -689,7 +690,7 @@ const renderFolderMenu = async () => {
     label.textContent = folder.name;
     button.appendChild(label);
     button.addEventListener('click', () => {
-      state.folderId = folder.id;
+      rememberFolder(folder.id);
       state.view = 'notes';
       closeSearch();
       closeMenus();
@@ -730,7 +731,7 @@ const createNewFolder = async () => {
   }
   const id = await createFolder(name);
   input.value = '';
-  state.folderId = id;
+  rememberFolder(id);
   state.view = 'notes';
   closeMenus();
   await render();
@@ -802,7 +803,7 @@ const deleteFolderDialog = async (folder) => {
   }
   await softDeleteFolder(folder.id);
   if (state.folderId === folder.id) {
-    state.folderId = null;
+    rememberFolder(null);
   }
   await render();
   await renderFolderMenu();
@@ -2184,6 +2185,12 @@ const resetSearchFilter = () => {
   }
 };
 
+const rememberFolder = (id) => {
+  state.folderId = id;
+  state.settings.lastFolderId = id;
+  saveSettings();
+};
+
 const closeSearch = () => {
   state.search.active = false;
   state.search.query = '';
@@ -2229,7 +2236,7 @@ const bindEvents = () => {
   });
 
   document.querySelector('#folder-menu [data-nav="all"]').addEventListener('click', () => {
-    state.folderId = null;
+    rememberFolder(null);
     state.view = 'notes';
     closeSearch();
     closeMenus();
@@ -2350,6 +2357,12 @@ const init = async () => {
   if (state.settings.defaultFolderId == null) {
     state.settings.defaultFolderId = inboxId;
     await saveSettings();
+  }
+
+  const remembered = state.settings.lastFolderId;
+  if (remembered != null) {
+    const folder = await getFolder(remembered);
+    state.folderId = folder && folder.deletedAt == null ? remembered : null;
   }
 
   applyTheme();

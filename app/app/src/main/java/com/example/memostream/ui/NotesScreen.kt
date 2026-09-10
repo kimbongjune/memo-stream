@@ -6,7 +6,9 @@ import com.example.memostream.sync.*
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.net.Uri
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.content.contentReceiver
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -290,6 +292,7 @@ private fun SearchBar(search: SearchState, state: AppState) {
     HorizontalDivider(color = memo.border)
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Composer(
     state: AppState,
@@ -379,6 +382,18 @@ private fun Composer(
                     )
                     .onFocusChanged {
                         focused = it.isFocused
+                    }
+                    .contentReceiver { received ->
+                        val data = received.clipEntry.clipData
+                        val uris = (0 until data.itemCount).mapNotNull { index ->
+                            data.getItemAt(index).uri
+                        }
+                        if (uris.isEmpty()) {
+                            received
+                        } else {
+                            state.attach(uris)
+                            null
+                        }
                     }
                     .padding(horizontal = 12.dp, vertical = 11.dp),
                 textStyle = MaterialTheme.typography.bodyMedium.copy(color = memo.fg),

@@ -193,6 +193,15 @@ class AppState(app: Application) : AndroidViewModel(app) {
                 }
                 repo.cleanupOldTrash(TRASH_KEEP_DAYS)
                 Capture.clear(app)
+                val remembered = settings.lastFolderId
+                if (remembered != null) {
+                    val folder = repo.folder(remembered)
+                    if (folder != null && folder.deletedAt == null) {
+                        _folderId.value = remembered
+                    } else {
+                        settings.lastFolderId = null
+                    }
+                }
             }
             refresh()
             runSync()
@@ -223,6 +232,7 @@ class AppState(app: Application) : AndroidViewModel(app) {
 
     fun selectFolder(id: Long?) {
         _folderId.value = id
+        settings.lastFolderId = id
         _pageSize.value = NOTE_PAGE_SIZE
         _screen.value = Screen.NOTES
         closeSearch()
@@ -459,6 +469,7 @@ class AppState(app: Application) : AndroidViewModel(app) {
         repo.softDeleteFolder(folder.id)
         if (_folderId.value == folder.id) {
             _folderId.value = null
+            settings.lastFolderId = null
         }
     }
 

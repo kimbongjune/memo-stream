@@ -620,6 +620,31 @@ class ContractTest {
     }
 
     @Test
+    fun `마지막에 고른 폴더를 기억한다`() {
+        val settings = dataSource("Settings.kt")
+        assertTrue("설정에 담는다", settings.contains("var lastFolderId: Long?"))
+
+        val state = source("ui/AppState.kt")
+        assertTrue("고를 때 저장", state.contains("settings.lastFolderId = id"))
+        assertTrue("시작할 때 복원", state.contains("val remembered = settings.lastFolderId"))
+        assertTrue(
+            "지워진 폴더면 전체로 돌아간다",
+            state.contains("if (folder != null && folder.deletedAt == null)")
+        )
+    }
+
+    @Test
+    fun `작성창에 이미지를 붙여넣을 수 있다`() {
+        val body = source("ui/NotesScreen.kt")
+        assertTrue("붙여넣기를 받는다", body.contains(".contentReceiver {"))
+        assertTrue(
+            "받은 것은 첨부 경로로 넘겨 압축을 똑같이 태운다",
+            body.contains("state.attach(uris)")
+        )
+        assertTrue("URI 가 없으면 그대로 넘긴다", body.contains("if (uris.isEmpty()) {"))
+    }
+
+    @Test
     fun `본문 링크를 누르면 열린다`() {
         val body = source("ui/MarkdownText.kt")
         assertTrue("링크 위치를 표시해 둔다", body.contains("addStringAnnotation("))
