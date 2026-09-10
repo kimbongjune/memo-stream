@@ -9,7 +9,8 @@ const assert = require('assert');
 const fs = require('fs');
 const marked = require('./lib/marked.min.js');
 
-const read = (path) => fs.readFileSync(path, 'utf8');
+const here = (name) => require('path').join(__dirname, name);
+const read = (path) => fs.readFileSync(here(path), 'utf8');
 const sources = {
   db: read('db.js'),
   markdown: read('markdown.js'),
@@ -249,7 +250,7 @@ for (const file of [
   'lib/ffmpeg/ffmpeg-core.js',
   'lib/ffmpeg/ffmpeg-core.wasm',
 ]) {
-  assert.ok(fs.existsSync(file), `${file} 가 있어야 한다`);
+  assert.ok(fs.existsSync(here(file)), `${file} 가 있어야 한다`);
 }
 assert.ok(sources.video.includes('URL.createObjectURL(file)'), '파일은 object URL로 넘긴다');
 // classWorkerURL을 넘기면 모듈 워커가 되고 importScripts가 없어 코어 로딩이 실패한다.
@@ -269,7 +270,7 @@ assert.ok(
 const stripComments = (src) =>
   src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 
-const jsFiles = fs.readdirSync('.').filter((name) => name.endsWith('.js') && name !== 'test.js');
+const jsFiles = fs.readdirSync(here('.')).filter((name) => name.endsWith('.js') && name !== 'test.js');
 for (const file of jsFiles) {
   const src = stripComments(read(file));
   assert.ok(!/\bdocument\.execCommand\b/.test(src), `${file}: execCommand는 폐기 대상이다`);
@@ -350,8 +351,8 @@ for (const file of [...jsFiles, 'sidepanel.html', 'manifest.json']) {
   assert.ok(!/\bdata-i18n\b/.test(src), `${file}: data-i18n 속성이 남아 있다`);
   assert.ok(!/\bi18n\.(load|get|locale)\b/.test(src), `${file}: i18n 객체를 아직 쓴다`);
 }
-assert.ok(!fs.existsSync('_locales'), '_locales 는 없어야 한다');
-assert.ok(!fs.existsSync('i18n.js'), 'i18n.js 는 없어야 한다');
+assert.ok(!fs.existsSync(here('_locales')), '_locales 는 없어야 한다');
+assert.ok(!fs.existsSync(here('i18n.js')), 'i18n.js 는 없어야 한다');
 assert.ok(manifest.default_locale === undefined, 'default_locale 은 없어야 한다');
 assert.ok(/[가-힣]/.test(manifest.name), 'manifest 이름이 실제 문구여야 한다');
 
