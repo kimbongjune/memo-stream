@@ -25,6 +25,18 @@ const mimeExt = (mime) => {
   return table[mime] || 'bin';
 };
 
+const COMPRESSED_MIME = /^(image|video|audio)\//;
+
+const zipAsync = (files) =>
+  new Promise((resolve, reject) => {
+    fflate.zip(files, { level: 6 }, (err, data) => (err ? reject(err) : resolve(data)));
+  });
+
+const unzipAsync = (bytes) =>
+  new Promise((resolve, reject) => {
+    fflate.unzip(bytes, (err, files) => (err ? reject(err) : resolve(files)));
+  });
+
 const exportZip = async () => {
   const folders = await getActiveFolders();
   const allNotes = await db.notes.toArray();
@@ -62,7 +74,9 @@ const exportZip = async () => {
       continue;
     }
     const buffer = await record.blob.arrayBuffer();
-    files[`assets/${assetNames.get(record.id)}`] = new Uint8Array(buffer);
+    const bytes = new Uint8Array(buffer);
+    const key = `assets/${assetNames.get(record.id)}`;
+    files[key] = COMPRESSED_MIME.test(record.mime || '') ? [bytes, { level: 0 }] : bytes;
   }
 
   const notesByFolder = new Map();
@@ -149,7 +163,7 @@ const exportZip = async () => {
   };
   files['backup.json'] = textEncoder.encode(JSON.stringify(backup));
 
-  const data = fflate.zipSync(files, { level: 6 });
+  const data = await zipAsync(files);
   return { data, name: `memo-export-${localDateKey(Date.now())}.zip` };
 };
 
@@ -158,7 +172,7 @@ const unzipData = (data) => {
   if (!(data instanceof Uint8Array)) {
     bytes = new Uint8Array(data);
   }
-  return fflate.unzipSync(bytes);
+  return unzipAsync(bytes);
 };
 
 const findAssetKey = (files, sha256) => {
@@ -206,11 +220,18 @@ const importFromBackup = async (backup, files) => {
     }
   }
 
+  const existingFolders = (await db.folders.toArray()).filter((row) => row.deletedAt == null);
   const folderIdMap = new Map();
   let foldersCreated = 0;
   for (const folder of backup.folders || []) {
+    const found = existingFolders.find((row) => row.name === folder.name);
+    if (found) {
+      folderIdMap.set(folder.id, found.id);
+      continue;
+    }
     const createdAt = folder.createdAt || Date.now();
     const id = await db.folders.add({
+      uid: newUid(),
       name: folder.name,
       order: folder.order || 0,
       pinned: !!folder.pinned,
@@ -218,15 +239,16 @@ const importFromBackup = async (backup, files) => {
       deletedAt: null,
       updatedAt: Date.now(),
     });
+    existingFolders.push({ id, name: folder.name, deletedAt: null });
     folderIdMap.set(folder.id, id);
     foldersCreated++;
   }
 
   let notesCreated = 0;
   for (const note of backup.notes || []) {
-    const folderId = folderIdMap.get(note.folderId);
+    let folderId = folderIdMap.get(note.folderId);
     if (folderId == null) {
-      continue;
+      folderId = await ensureInbox();
     }
     const blobIds = (note.blobIds || [])
       .map((oldId) => blobIdMap.get(oldId))
@@ -239,6 +261,7 @@ const importFromBackup = async (backup, files) => {
       return `blob:${newId}`;
     });
     await db.notes.add({
+      uid: newUid(),
       folderId,
       content,
       blobIds,
@@ -364,6 +387,7 @@ const importFromMarkdown = async (files) => {
 
     const now = Date.now();
     await db.notes.add({
+      uid: newUid(),
       folderId,
       content,
       blobIds: [...usedIds],
@@ -394,7 +418,7 @@ const importFromMarkdown = async (files) => {
 };
 
 const importFromZip = async (data) => {
-  const files = unzipData(data);
+  const files = await unzipData(data);
   if (files['backup.json']) {
     const backup = JSON.parse(textDecoder.decode(files['backup.json']));
     return importFromBackup(backup, files);

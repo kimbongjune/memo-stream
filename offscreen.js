@@ -25,10 +25,25 @@ const report = (progress) => {
   chrome.runtime.sendMessage({ type: 'video-progress', progress }).catch(() => {});
 };
 
-const compress = async ({ url, maxHeight = 720, crf = 28 }) => {
+let jobChain = Promise.resolve();
+
+const runExclusive = (job) => {
+  const next = jobChain.then(job, job);
+  jobChain = next.then(
+    () => {},
+    () => {}
+  );
+  return next;
+};
+
+const compress = ({ url, maxHeight = 720, crf = 28 }) => runExclusive(async () => {
   const instance = await loadFFmpeg();
   const response = await fetch(url);
   const bytes = new Uint8Array(await response.arrayBuffer());
+
+  const tag = crypto.randomUUID().slice(0, 8);
+  const input = `in-${tag}`;
+  const output = `out-${tag}.mp4`;
 
   const onProgress = ({ progress }) => {
     report(Math.max(0, Math.min(100, Math.round(progress * 100))));
@@ -36,28 +51,29 @@ const compress = async ({ url, maxHeight = 720, crf = 28 }) => {
   instance.on('progress', onProgress);
 
   try {
-    await instance.writeFile('in', bytes);
+    await instance.writeFile(input, bytes);
     await instance.exec([
-      '-i', 'in',
+      '-i', input,
       '-vf', `scale='trunc(min(1,${maxHeight}/ih)*iw/2)*2':'trunc(min(${maxHeight},ih)/2)*2'`,
       '-c:v', 'libx264',
+      '-pix_fmt', 'yuv420p',
       '-preset', 'veryfast',
       '-crf', String(crf),
       '-c:a', 'aac',
       '-b:a', '96k',
       '-movflags', '+faststart',
       '-threads', '1',
-      'out.mp4',
+      output,
     ]);
-    const out = await instance.readFile('out.mp4');
+    const out = await instance.readFile(output);
     const blob = new Blob([out], { type: 'video/mp4' });
     return { url: URL.createObjectURL(blob), size: blob.size };
   } finally {
     instance.off('progress', onProgress);
-    instance.deleteFile('in').catch(() => {});
-    instance.deleteFile('out.mp4').catch(() => {});
+    instance.deleteFile(input).catch(() => {});
+    instance.deleteFile(output).catch(() => {});
   }
-};
+});
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || message.target !== 'offscreen-video') {

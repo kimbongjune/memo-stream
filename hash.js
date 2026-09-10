@@ -64,6 +64,35 @@ const resizeToCanvas = (source, maxDim) => {
 const makeThumbnail = (source, maxDim = THUMB_DIM) =>
   canvasToBlob(resizeToCanvas(source, maxDim), 'image/webp', 0.7);
 
+const gifFrameCount = (bytes) => {
+  let frames = 0;
+  for (let i = 0; i + 3 < bytes.length; i++) {
+    if (bytes[i] === 0x21 && bytes[i + 1] === 0xf9 && bytes[i + 2] === 0x04) {
+      frames++;
+      if (frames > 1) {
+        return frames;
+      }
+    }
+  }
+  return frames;
+};
+
+const isAnimatedImage = async (file) => {
+  const type = file.type || '';
+  if (type === 'image/gif') {
+    return gifFrameCount(new Uint8Array(await file.arrayBuffer())) > 1;
+  }
+  if (type !== 'image/webp') {
+    return false;
+  }
+  const head = new Uint8Array(await file.slice(0, 21).arrayBuffer());
+  if (head.length < 21) {
+    return false;
+  }
+  const chunk = String.fromCharCode(head[12], head[13], head[14], head[15]);
+  return chunk === 'VP8X' && (head[20] & 0x02) !== 0;
+};
+
 const processImageFile = async (file) => {
   const bitmap = await createImageBitmap(file);
   try {
@@ -94,8 +123,8 @@ const processImageFile = async (file) => {
   }
 };
 
-const processBinaryFile = (file) =>
-  findOrInsertBlob({
+function processBinaryFile(file) {
+  return findOrInsertBlob({
     blob: file,
     thumb: null,
     mime: file.type || 'application/octet-stream',
@@ -104,3 +133,4 @@ const processBinaryFile = (file) =>
     height: 0,
     name: file.name || '',
   });
+}

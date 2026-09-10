@@ -10,6 +10,26 @@ const attrEscape = (value) =>
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 
+const BLOB_URL_CACHE_MAX = 500;
+const blobUrlCache = new Map();
+
+const blobUrlFor = (key, blob) => {
+  const hit = blobUrlCache.get(key);
+  if (hit) {
+    blobUrlCache.delete(key);
+    blobUrlCache.set(key, hit);
+    return hit;
+  }
+  const url = URL.createObjectURL(blob);
+  blobUrlCache.set(key, url);
+  while (blobUrlCache.size > BLOB_URL_CACHE_MAX) {
+    const oldest = blobUrlCache.keys().next().value;
+    URL.revokeObjectURL(blobUrlCache.get(oldest));
+    blobUrlCache.delete(oldest);
+  }
+  return url;
+};
+
 class Markdown {
   constructor() {
     this.parser = null;
@@ -45,12 +65,19 @@ class Markdown {
     return `memo-${id}.${subtype}`;
   }
 
-  static mediaMarkup(mime, url, fileName) {
+  static mediaMarkup(record, url, fileName) {
+    const mime = record.mime || 'application/octet-stream';
+    let size = '';
+    if (record.width > 0 && record.height > 0) {
+      size = ` width="${record.width}" height="${record.height}"`;
+    }
     let element = '';
-    if (mime.startsWith('video/')) {
-      element = `<video src="${url}" controls preload="metadata"></video>`;
+    if (mime.startsWith('video/') && record.loop) {
+      element = `<video src="${url}"${size} loop autoplay muted playsinline></video>`;
+    } else if (mime.startsWith('video/')) {
+      element = `<video src="${url}"${size} controls preload="metadata"></video>`;
     } else {
-      element = `<img src="${url}" alt="">`;
+      element = `<img src="${url}"${size} alt="">`;
     }
     const save = '저장';
     return (
@@ -61,7 +88,6 @@ class Markdown {
 
   async render(content) {
     const rawHtml = this.getParser().parse(content || '');
-    const objectUrls = [];
     let html = rawHtml;
 
     for (const id of this.collectRefs(rawHtml)) {
@@ -69,15 +95,14 @@ class Markdown {
       if (!record || !record.blob) {
         continue;
       }
-      const url = URL.createObjectURL(record.blob);
-      objectUrls.push(url);
+      const url = blobUrlFor(`blob:${id}`, record.blob);
 
       const mime = record.mime || 'application/octet-stream';
       const fileName = attrEscape(Markdown.fileNameOf(record, id));
 
       if (mime.startsWith('image/') || mime.startsWith('video/')) {
         const tag = new RegExp(`<img[^>]*src="blob:${id}"[^>]*>`, 'g');
-        html = html.replace(tag, Markdown.mediaMarkup(mime, url, fileName));
+        html = html.replace(tag, Markdown.mediaMarkup(record, url, fileName));
       }
 
       html = html.split(`src="blob:${id}"`).join(`src="${url}"`);
@@ -85,10 +110,10 @@ class Markdown {
     }
 
     const clean = DOMPurify.sanitize(html, {
-      ADD_ATTR: ['target', 'download', 'controls', 'preload'],
+      ADD_ATTR: ['target', 'download', 'controls', 'preload', 'loop', 'autoplay', 'muted', 'playsinline'],
       ALLOWED_URI_REGEXP: BLOB_URI_OK,
     });
-    return { html: clean, objectUrls };
+    return { html: clean };
   }
 
   highlight(root, query) {

@@ -3,6 +3,8 @@
 const MAX_ATTACH_BYTES = 200 * 1024 * 1024;
 const LONG_NOTE_CHARS = 500;
 const TRASH_KEEP_DAYS = 30;
+const NOTE_PAGE_SIZE = 200;
+const PENDING_CAPTURE_MAX_AGE_MS = 60 * 1000;
 const FILTER_LABELS = { image: '사진', video: '동영상', file: '파일' };
 
 const state = {
@@ -16,8 +18,8 @@ const state = {
     onboarded: false,
     lastExportAt: null,
   },
-  objectUrls: [],
   draftRefs: [],
+  pageSize: NOTE_PAGE_SIZE,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -215,17 +217,6 @@ const dateLabel = (key) => {
   return key;
 };
 
-const revokeObjectUrls = () => {
-  for (const url of state.objectUrls) {
-    try {
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      console.debug('revoke skipped', err);
-    }
-  }
-  state.objectUrls = [];
-};
-
 const collectBlobIds = (content) => {
   const matches = [...(content || '').matchAll(/blob:(\d+)/g)];
   return [...new Set(matches.map((match) => Number(match[1])))];
@@ -259,14 +250,6 @@ const joinAttachments = (text, refs) => {
 };
 
 const renderAttachChips = async (container, refs, onRemove) => {
-  for (const url of container._urls || []) {
-    try {
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      console.debug('revoke skipped', err);
-    }
-  }
-  container._urls = [];
   container.innerHTML = '';
   container.classList.toggle('hidden', refs.length === 0);
 
@@ -277,9 +260,8 @@ const renderAttachChips = async (container, refs, onRemove) => {
 
     if (record && record.blob && (record.mime || '').startsWith('image/')) {
       const image = document.createElement('img');
-      const url = URL.createObjectURL(record.thumb || record.blob);
-      container._urls.push(url);
-      image.src = url;
+      const source = record.thumb || record.blob;
+      image.src = blobUrlFor(`${record.thumb ? 'thumb' : 'blob'}:${ref.id}`, source);
       image.alt = '';
       chip.appendChild(image);
     } else {
@@ -330,6 +312,11 @@ const updateHeader = () => {
 };
 
 const render = async () => {
+  if (lastRenderedView === 'notes' && state.view !== 'notes') {
+    savedTop = $('#main').scrollTop;
+  }
+  lastRenderedView = state.view;
+
   updateHeader();
   $('#note-list').classList.toggle('hidden', state.view !== 'notes');
   $('#settings-view').classList.toggle('hidden', state.view !== 'settings');
@@ -368,8 +355,7 @@ const renderNoteBubble = async (note, folderNames) => {
 
   const body = document.createElement('div');
   body.className = 'note-body';
-  const { html, objectUrls } = await md.render(note.content);
-  state.objectUrls.push(...objectUrls);
+  const { html } = await md.render(note.content);
   body.innerHTML = html;
 
   for (const anchor of body.querySelectorAll('a')) {
@@ -447,37 +433,128 @@ const groupByDate = (notes) => {
   return groups;
 };
 
-const renderNotes = async (extraNote = null) => {
+let renderSeq = 0;
+
+let editingNoteId = null;
+let renderMissedWhileEditing = false;
+let lastScopeKey = null;
+let lastRenderedFolderId = null;
+let lastRenderedView = null;
+let stickBottom = true;
+let savedTop = null;
+let bubbleCache = new Map();
+
+const trackScroll = () => {
+  const main = $('#main');
+  main.addEventListener('scroll', () => {
+    if (state.view !== 'notes' || $('#note-list').classList.contains('hidden')) {
+      return;
+    }
+    stickBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 80;
+  });
+};
+
+const stickToBottom = (main, seq) => {
+  const apply = () => {
+    if (seq !== renderSeq) {
+      return;
+    }
+    main.scrollTop = main.scrollHeight;
+    stickBottom = true;
+  };
+  apply();
+  requestAnimationFrame(apply);
+  for (const media of $('#note-list').querySelectorAll('img, video')) {
+    media.addEventListener('load', apply, { once: true });
+    media.addEventListener('loadedmetadata', apply, { once: true });
+  }
+};
+
+const renderNotes = async (extraNote = null, stick = false) => {
+  if (editingNoteId != null) {
+    renderMissedWhileEditing = true;
+    return;
+  }
+  const seq = ++renderSeq;
   const list = $('#note-list');
-  revokeObjectUrls();
+  const frame = document.createDocumentFragment();
 
   const { active, query, global, kind } = state.search;
-  const scope = active && global ? null : state.folderId;
+  const scopeKey = JSON.stringify([state.folderId, active, query, global, kind]);
+  if (scopeKey !== lastScopeKey) {
+    lastScopeKey = scopeKey;
+    state.pageSize = NOTE_PAGE_SIZE;
+  }
+
+  const main = $('#main');
+  const folderChanged = state.folderId !== lastRenderedFolderId;
+  lastRenderedFolderId = state.folderId;
+  const goBottom = stick || folderChanged || stickBottom;
+
+  const needle = query.trim();
+  const searching = active && (needle.length > 0 || kind.length > 0);
+  const scope = searching && global ? null : state.folderId;
   let notes = null;
-  if (active && query.trim()) {
+  if (needle) {
     notes = await searchNotes(query, scope);
   } else {
     notes = await getNotes(scope);
   }
-  if (active && kind) {
+  if (searching && kind) {
     notes = await filterNotesByMedia(notes, kind);
   }
   if (extraNote) {
     notes = [...notes, extraNote];
   }
+  if (seq !== renderSeq) {
+    return;
+  }
 
-  list.innerHTML = '';
+  const marked = searching && needle ? needle : '';
+  const bubbleKey = (note) =>
+    [
+      note.updatedAt || 0,
+      note.editedAt || 0,
+      note.pinned ? 1 : 0,
+      note.folderId,
+      folderNames.get(note.folderId) || '',
+      marked,
+    ].join('|');
+  const nextCache = new Map();
+  const bubbleFor = async (note) => {
+    const key = bubbleKey(note);
+    const hit = bubbleCache.get(note.id);
+    if (hit && hit.key === key) {
+      nextCache.set(note.id, hit);
+      return hit.element;
+    }
+    const element = await renderNoteBubble(note, folderNames);
+    if (marked) {
+      md.highlight(element.querySelector('.note-body'), marked);
+    }
+    nextCache.set(note.id, { key, element });
+    return element;
+  };
+
+  const commit = () => {
+    list.replaceChildren(frame);
+    bubbleCache = nextCache;
+  };
+
   if (notes.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty-state';
     empty.textContent = emptyStateText();
-    list.appendChild(empty);
+    frame.appendChild(empty);
+    commit();
     return;
   }
 
   const ascending = (a, b) => (a.createdAt || 0) - (b.createdAt || 0);
   const pinned = notes.filter((note) => note.pinned).sort(ascending);
-  const rest = notes.filter((note) => !note.pinned).sort(ascending);
+  const all = notes.filter((note) => !note.pinned).sort(ascending);
+  const hidden = Math.max(0, all.length - state.pageSize);
+  const rest = hidden > 0 ? all.slice(hidden) : all;
 
   const folderNames = new Map();
   if (state.folderId == null) {
@@ -486,31 +563,57 @@ const renderNotes = async (extraNote = null) => {
       folderNames.set(folder.id, folder.name);
     }
   }
+  if (seq !== renderSeq) {
+    return;
+  }
 
   const addSeparator = (label) => {
     const separator = document.createElement('div');
     separator.className = 'date-sep';
     separator.textContent = label;
-    list.appendChild(separator);
+    frame.appendChild(separator);
   };
 
   const addGroups = async (groupNotes) => {
     for (const [key, dayNotes] of groupByDate(groupNotes)) {
       addSeparator(dateLabel(key));
       for (const note of dayNotes) {
-        list.appendChild(await renderNoteBubble(note, folderNames));
+        const bubble = await bubbleFor(note);
+        if (seq !== renderSeq) {
+          return false;
+        }
+        frame.appendChild(bubble);
       }
     }
+    return true;
   };
+
+  if (hidden > 0) {
+    const more = document.createElement('button');
+    more.className = 'expand-btn';
+    more.textContent = `이전 메모 ${hidden}개 더 보기`;
+    more.addEventListener('click', async () => {
+      const anchor = main.scrollHeight - main.scrollTop;
+      state.pageSize += NOTE_PAGE_SIZE;
+      stickBottom = false;
+      await renderNotes();
+      main.scrollTop = main.scrollHeight - anchor;
+    });
+    frame.appendChild(more);
+  }
 
   if (pinned.length > 0) {
     addSeparator('고정됨');
     for (const note of pinned) {
-      list.appendChild(await renderNoteBubble(note, folderNames));
+      const bubble = await bubbleFor(note);
+      if (seq !== renderSeq) {
+        return;
+      }
+      frame.appendChild(bubble);
     }
   }
 
-  if (state.folderId == null && !state.search.active) {
+  if (state.folderId == null && !searching) {
     const folderGroups = new Map();
     for (const note of rest) {
       const key = note.folderId != null ? note.folderId : '__none__';
@@ -527,21 +630,25 @@ const renderNotes = async (extraNote = null) => {
       const header = document.createElement('div');
       header.className = 'folder-group-header';
       header.textContent = name;
-      list.appendChild(header);
-      await addGroups(groupNotes);
+      frame.appendChild(header);
+      if (!(await addGroups(groupNotes))) {
+        return;
+      }
     }
-  } else {
-    await addGroups(rest);
+  } else if (!(await addGroups(rest))) {
+    return;
   }
 
-  if (state.search.active && state.search.query.trim()) {
-    for (const body of list.querySelectorAll('.note-body')) {
-      md.highlight(body, state.search.query);
-    }
-  }
+  commit();
 
-  const main = $('#main');
-  main.scrollTop = main.scrollHeight;
+  if (savedTop != null) {
+    main.scrollTop = savedTop;
+    savedTop = null;
+    return;
+  }
+  if (goBottom || extraNote) {
+    stickToBottom(main, seq);
+  }
 };
 
 const renderFolderMenu = async () => {
@@ -584,9 +691,7 @@ const renderFolderMenu = async () => {
     button.addEventListener('click', () => {
       state.folderId = folder.id;
       state.view = 'notes';
-      state.search.active = false;
-      $('#search-bar').classList.add('hidden');
-      $('#search-toggle').classList.remove('active');
+      closeSearch();
       closeMenus();
       render();
     });
@@ -914,6 +1019,18 @@ const startEdit = (note) => {
     return;
   }
   const originalHtml = body.innerHTML;
+  editingNoteId = note.id;
+  renderMissedWhileEditing = false;
+
+  const endEdit = async () => {
+    editingNoteId = null;
+    if (renderMissedWhileEditing) {
+      renderMissedWhileEditing = false;
+      await renderNotes();
+      return true;
+    }
+    return false;
+  };
   const split = splitAttachments(note.content);
   let refs = split.refs;
 
@@ -940,9 +1057,10 @@ const startEdit = (note) => {
   const cancel = document.createElement('button');
   cancel.className = 'btn';
   cancel.textContent = '취소';
-  cancel.addEventListener('click', () => {
-    renderAttachChips(strip, [], () => {});
-    body.innerHTML = originalHtml;
+  cancel.addEventListener('click', async () => {
+    if (!(await endEdit())) {
+      body.innerHTML = originalHtml;
+    }
   });
 
   const save = document.createElement('button');
@@ -958,6 +1076,7 @@ const startEdit = (note) => {
       }
     }
     showToast('저장했습니다');
+    await endEdit();
     await renderNotes();
     syncSoon();
   });
@@ -979,9 +1098,9 @@ const sendNote = async () => {
 
   const content = joinAttachments(typed, refs);
   const blobIds = collectBlobIds(content);
-  let folderId = state.settings.defaultFolderId;
-  if (state.folderId != null) {
-    folderId = state.folderId;
+  let folderId = state.folderId;
+  if (folderId == null) {
+    folderId = await defaultFolderId();
   }
 
   input.value = '';
@@ -1003,7 +1122,7 @@ const sendNote = async () => {
 
   try {
     await createNote({ folderId, content, blobIds });
-    await renderNotes();
+    await renderNotes(null, true);
     syncSoon();
   } catch (err) {
     console.error('sendNote failed', err);
@@ -1016,8 +1135,22 @@ const sendNote = async () => {
   }
 };
 
+const defaultFolderId = async () => {
+  const current = state.settings.defaultFolderId;
+  if (current != null) {
+    const folder = await getFolder(current);
+    if (folder && folder.deletedAt == null) {
+      return current;
+    }
+  }
+  const fallback = await ensureInbox();
+  state.settings.defaultFolderId = fallback;
+  await saveSettings();
+  return fallback;
+};
+
 const handleCapture = async (message) => {
-  const folderId = state.settings.defaultFolderId || (await ensureInbox());
+  const folderId = await defaultFolderId();
   let content = '';
   if (message.kind === 'selection' && message.text) {
     const quoted = String(message.text)
@@ -1063,7 +1196,7 @@ const processPendingCapture = async () => {
     if (!pendingCapture) {
       return;
     }
-    if (Date.now() - (pendingCapture.at || 0) > 5000) {
+    if (Date.now() - (pendingCapture.at || 0) > PENDING_CAPTURE_MAX_AGE_MS) {
       await chrome.storage.session.remove('pendingCapture');
       return;
     }
@@ -1207,8 +1340,15 @@ const filesFromDataTransfer = (dataTransfer) => {
 };
 
 const storeAttachment = async (file, status) => {
-  const isVideo = (file.type || '').startsWith('video/');
+  let isVideo = (file.type || '').startsWith('video/');
   let isImage = (file.type || '').startsWith('image/');
+  let loop = false;
+
+  if (isImage && (await isAnimatedImage(file))) {
+    isImage = false;
+    isVideo = true;
+    loop = true;
+  }
 
   let source = file;
   if (isVideo && state.settings.compressVideo !== false) {
@@ -1229,6 +1369,9 @@ const storeAttachment = async (file, status) => {
       id = (await processImageFile(source)).id;
     } else {
       id = (await processBinaryFile(source)).id;
+    }
+    if (loop) {
+      await db.blobs.update(id, { loop: true });
     }
   } catch (err) {
     if (!isImage) {
@@ -1299,7 +1442,14 @@ const handleComposerKeydown = (input, event) => {
     insertLink(input);
     return;
   }
+  if (event.key === 'Escape') {
+    input.blur();
+    return;
+  }
   if (event.key === 'Tab') {
+    if (!input.value) {
+      return;
+    }
     event.preventDefault();
     indentLines(input, event.shiftKey ? -1 : 1);
     return;
@@ -1403,6 +1553,9 @@ const selectEl = (options, value, onChange) => {
     select.appendChild(element);
   }
   select.value = String(value);
+  if (select.selectedIndex < 0) {
+    select.selectedIndex = 0;
+  }
   select.addEventListener('change', () => onChange(select.value));
   return select;
 };
@@ -1575,12 +1728,13 @@ const renderGeneralSection = async () => {
   section.appendChild(heading);
 
   const folders = await getActiveFolders();
+  const currentDefault = await defaultFolderId();
   section.appendChild(
     settingRow(
       '기본 폴더',
       selectEl(
         folders.map((folder) => ({ value: folder.id, label: folder.name })),
-        state.settings.defaultFolderId,
+        currentDefault,
         async (value) => {
           state.settings.defaultFolderId = Number(value);
           await saveSettings();
@@ -1685,9 +1839,20 @@ const renderSyncSection = () => {
       button.disabled = true;
       input.disabled = true;
       try {
-        const provisioned = await sbProvision(token, (message) => setStatus(message));
-        state.settings.sb = { ...provisioned, enabled: true, uploaded: [] };
+        const { dbPass, ...provisioned } = await sbProvision(token, (message) =>
+          setStatus(message)
+        );
+        state.settings.sb = { ...provisioned, enabled: true };
         await saveSettings();
+        if (dbPass) {
+          await showDialog({
+            title: '데이터베이스 비밀번호',
+            message:
+              '방금 만든 Supabase 프로젝트의 Postgres 비밀번호입니다. 지금 한 번만 보여주고 어디에도 저장하지 않습니다. 필요하면 지금 복사해 두세요. 잃어버려도 Supabase 대시보드에서 재설정할 수 있습니다.',
+            input: { value: dbPass },
+            buttons: [{ label: '확인', value: 'ok', primary: true }],
+          });
+        }
         setStatus('연결됐습니다. 첫 동기화 중...');
         await syncNow((message) => setStatus(message));
         await renderSettings();
@@ -1808,6 +1973,30 @@ const renderSettings = async () => {
   view.appendChild(renderSyncSection());
 };
 
+const revokeAfterDownload = async (downloadId, url) => {
+  let settled = false;
+  const finish = () => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    chrome.downloads.onChanged.removeListener(onChanged);
+    clearTimeout(backstop);
+    URL.revokeObjectURL(url);
+  };
+  const onChanged = (delta) => {
+    if (delta.id === downloadId && delta.state && delta.state.current !== 'in_progress') {
+      finish();
+    }
+  };
+  const backstop = setTimeout(finish, 60 * 60 * 1000);
+  chrome.downloads.onChanged.addListener(onChanged);
+  const [item] = await chrome.downloads.search({ id: downloadId });
+  if (!item || item.state !== 'in_progress') {
+    finish();
+  }
+};
+
 const doExport = async () => {
   try {
     showToast('내보내기 파일을 만드는 중...');
@@ -1815,7 +2004,8 @@ const doExport = async () => {
     const blob = new Blob([data], { type: 'application/zip' });
     const url = URL.createObjectURL(blob);
     if (chrome.downloads && chrome.downloads.download) {
-      await chrome.downloads.download({ url, filename: name, saveAs: true });
+      const downloadId = await chrome.downloads.download({ url, filename: name, saveAs: true });
+      revokeAfterDownload(downloadId, url);
     } else {
       const anchor = document.createElement('a');
       anchor.href = url;
@@ -1823,8 +2013,8 @@ const doExport = async () => {
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
     }
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
     state.settings.lastExportAt = Date.now();
     await saveSettings();
     showToast('내보내기를 마쳤습니다');
@@ -1987,21 +2177,28 @@ const resetSearchFilter = () => {
   }
 };
 
-const toggleSearch = () => {
+const closeSearch = () => {
+  state.search.active = false;
+  state.search.query = '';
+  resetSearchFilter();
+  $('#search-input').value = '';
+  $('#search-bar').classList.add('hidden');
+  $('#search-toggle').classList.remove('active');
+};
+
+const toggleSearch = async () => {
   state.search.active = !state.search.active;
   $('#search-bar').classList.toggle('hidden', !state.search.active);
   $('#search-toggle').classList.toggle('active', state.search.active);
   if (state.search.active) {
     state.view = 'notes';
-    render();
+    await render();
     $('#search-input').focus();
     return;
   }
-  state.search.query = '';
-  resetSearchFilter();
-  $('#search-input').value = '';
+  closeSearch();
   if (state.view === 'notes') {
-    renderNotes();
+    await renderNotes();
   }
 };
 
@@ -2027,9 +2224,7 @@ const bindEvents = () => {
   document.querySelector('#folder-menu [data-nav="all"]').addEventListener('click', () => {
     state.folderId = null;
     state.view = 'notes';
-    state.search.active = false;
-    $('#search-bar').classList.add('hidden');
-    $('#search-toggle').classList.remove('active');
+    closeSearch();
     closeMenus();
     render();
   });
@@ -2078,14 +2273,8 @@ const bindEvents = () => {
   }
 
   $('#search-close').addEventListener('click', () => {
-    state.search.active = false;
-    state.search.query = '';
-    resetSearchFilter();
-    $('#search-input').value = '';
-    $('#search-bar').classList.add('hidden');
-    $('#search-toggle').classList.remove('active');
-    if (state.view === 'notes') {
-      renderNotes();
+    if (state.search.active) {
+      toggleSearch();
     }
   });
 
@@ -2151,6 +2340,7 @@ const init = async () => {
 
   applyTheme();
   bindEvents();
+  trackScroll();
   await cleanupOldTrash(TRASH_KEEP_DAYS);
   await render();
   await processPendingCapture();

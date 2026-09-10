@@ -2,10 +2,12 @@
 
 const SYNC_DEBOUNCE_MS = 2000;
 const SYNC_PURGE_CHUNK = 200;
+const SYNC_REMOTE_LIST_LIMIT = 10000;
 
 let syncRunning = false;
 let syncTimer = null;
 let purgeSaveTimer = null;
+const uploadedShas = new Set();
 
 const syncConf = () => {
   const conf = state.settings.sb;
@@ -55,12 +57,15 @@ const syncSoon = (delay = SYNC_DEBOUNCE_MS) => {
 };
 
 notePurgedHook = (note) => {
+  if (!note.uid) {
+    return;
+  }
   if (!state.settings.purgeQueue) {
     state.settings.purgeQueue = [];
   }
   const queue = state.settings.purgeQueue;
-  if (!queue.includes(note.createdAt)) {
-    queue.push(note.createdAt);
+  if (!queue.includes(note.uid)) {
+    queue.push(note.uid);
   }
   clearTimeout(purgeSaveTimer);
   purgeSaveTimer = setTimeout(() => {
@@ -78,11 +83,12 @@ const syncPurges = async (conf, onProgress) => {
   const purgedAt = Date.now();
   for (let offset = 0; offset < queue.length; offset += SYNC_PURGE_CHUNK) {
     const chunk = queue.slice(offset, offset + SYNC_PURGE_CHUNK);
-    await sbRest(conf, `/notes?created_at=in.(${chunk.join(',')})`, {
+    const list = chunk.map((uid) => `"${uid}"`).join(',');
+    await sbRest(conf, `/notes?uid=in.(${list})`, {
       method: 'DELETE',
       headers: { Prefer: 'return=minimal' },
     });
-    const rows = chunk.map((createdAt) => ({ created_at: createdAt, purged_at: purgedAt }));
+    const rows = chunk.map((uid) => ({ uid, purged_at: purgedAt }));
     await sbUpsert(conf, 'purges', rows);
   }
   state.settings.purgeQueue = [];
@@ -97,30 +103,41 @@ const syncCleanupRemoteBlobs = async (onProgress = () => {}) => {
   const response = await fetch(`${conf.url}/storage/v1/object/list/${SB_BUCKET}`, {
     method: 'POST',
     headers: sbHeaders(conf, { 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ prefix: 'blobs/', limit: 10000, offset: 0 }),
+    body: JSON.stringify({ prefix: 'blobs/', limit: SYNC_REMOTE_LIST_LIMIT, offset: 0 }),
   });
   if (!response.ok) {
     throw new Error(`storage list ${response.status}`);
   }
   const objects = await response.json();
+  if ((objects || []).length >= SYNC_REMOTE_LIST_LIMIT) {
+    console.warn(`원격 첨부가 ${SYNC_REMOTE_LIST_LIMIT}개를 넘어 이번 정리에서는 앞부분만 봅니다.`);
+  }
+
+  onProgress('참조 확인 중...');
+  const rows = (await sbRest(conf, '/notes?select=blobs')) || [];
+  const referenced = new Set();
+  for (const row of rows) {
+    for (const meta of row.blobs || []) {
+      if (meta && meta.sha) {
+        referenced.add(meta.sha);
+      }
+    }
+  }
 
   let removed = 0;
   for (const object of objects || []) {
     const sha = object.name;
-    onProgress(`원격 첨부 확인 중... (${removed})`);
-    const filter = encodeURIComponent(JSON.stringify([{ sha }]));
-    const refs = await sbRest(conf, `/notes?select=created_at&limit=1&blobs=cs.${filter}`);
-    if (refs && refs.length) {
+    if (referenced.has(sha)) {
       continue;
     }
+    onProgress(`원격 첨부 정리 중... (${removed})`);
     await fetch(`${conf.url}/storage/v1/object/${SB_BUCKET}/blobs/${sha}`, {
       method: 'DELETE',
       headers: sbHeaders(conf),
     });
-    conf.uploaded = (conf.uploaded || []).filter((item) => item !== sha);
+    uploadedShas.delete(sha);
     removed++;
   }
-  await saveSettings();
   return removed;
 };
 
@@ -159,7 +176,7 @@ const syncPullTombstones = async (conf, since) => {
   let changed = 0;
   for (const tomb of tombs || []) {
     watermark = Math.max(watermark, tomb.purged_at);
-    const local = await db.notes.where('createdAt').equals(tomb.created_at).first();
+    const local = await db.notes.where('uid').equals(tomb.uid).first();
     if (!local) {
       continue;
     }
@@ -179,24 +196,25 @@ const syncPullFolders = async (remote, folders, since) => {
 
   for (const row of remote || []) {
     watermark = Math.max(watermark, row.updated_at);
-    let local = folders.find((folder) => folder.createdAt === row.created_at);
+    let local = folders.find((folder) => folder.uid === row.uid);
 
     if (!local && since === 0) {
       local = folders.find(
         (folder) =>
           folder.name === row.name &&
           !claimed.has(folder.id) &&
-          !(remote || []).some((other) => other.created_at === folder.createdAt)
+          !(remote || []).some((other) => other.uid === folder.uid)
       );
     }
     if (local) {
       claimed.add(local.id);
     }
-    if (local && local.createdAt === row.created_at && rowVersion(local) >= row.updated_at) {
+    if (local && local.uid === row.uid && rowVersion(local) >= row.updated_at) {
       continue;
     }
 
     const patch = {
+      uid: row.uid,
       name: row.name,
       order: row.order || 0,
       pinned: !!row.pinned,
@@ -219,29 +237,39 @@ const syncPullFolders = async (remote, folders, since) => {
 const syncPullNotes = async (conf, remote, folders, since, onProgress) => {
   let watermark = since;
   let changed = 0;
+  let stalled = 0;
 
   for (const row of remote || []) {
-    watermark = Math.max(watermark, row.updated_at);
-    const local = await db.notes.where('createdAt').equals(row.created_at).first();
-    if (local && rowVersion(local) >= row.updated_at) {
+    const local = await db.notes.where('uid').equals(row.uid).first();
+    if (local && !local.pullPending && rowVersion(local) >= row.updated_at) {
+      watermark = Math.max(watermark, row.updated_at);
       continue;
     }
 
     let content = row.content || '';
     const blobIds = [];
+    let missedBlob = false;
     for (const meta of row.blobs || []) {
       onProgress('첨부 받는 중...');
       const id = await ensureLocalBlob(conf, meta);
       if (id == null) {
+        missedBlob = true;
         continue;
       }
       blobIds.push(id);
       content = content.split(`blob:${meta.sha})`).join(`blob:${id})`);
     }
 
-    const folder = folders.find((item) => item.createdAt === row.folder_created_at);
+    if (missedBlob) {
+      stalled++;
+    } else {
+      watermark = Math.max(watermark, row.updated_at);
+    }
+
+    const folder = folders.find((item) => item.uid === row.folder_uid);
     const patch = {
-      folderId: folder ? folder.id : state.settings.defaultFolderId,
+      uid: row.uid,
+      folderId: folder ? folder.id : await ensureInbox(),
       content,
       blobIds,
       sourceUrl: row.source_url || null,
@@ -251,6 +279,7 @@ const syncPullNotes = async (conf, remote, folders, since, onProgress) => {
       editedAt: row.edited_at || null,
       deletedAt: row.deleted_at || null,
       updatedAt: row.updated_at,
+      pullPending: missedBlob ? true : null,
     };
     if (local) {
       await db.notes.update(local.id, patch);
@@ -262,27 +291,35 @@ const syncPullNotes = async (conf, remote, folders, since, onProgress) => {
     }
     changed++;
   }
+  if (stalled > 0) {
+    console.warn(`${stalled}건은 첨부를 못 받아 워터마크를 미뤘습니다. 다음 동기화에서 재시도합니다.`);
+  }
   return { watermark, changed };
 };
 
 const syncPull = async (conf, onProgress) => {
   onProgress('받는 중...');
-  const since = conf.lastPullAt || 0;
+  const sinceFolders = conf.lastPullFolders || 0;
+  const sinceNotes = conf.lastPullNotes || 0;
+  const sincePurges = conf.lastPullPurges || 0;
+
   const [remoteFolders, remoteNotes] = await Promise.all([
-    sbRest(conf, `/folders?updated_at=gt.${since}&order=updated_at.asc`),
-    sbRest(conf, `/notes?updated_at=gt.${since}&order=updated_at.asc`),
+    sbRest(conf, `/folders?updated_at=gt.${sinceFolders}&order=updated_at.asc`),
+    sbRest(conf, `/notes?updated_at=gt.${sinceNotes}&order=updated_at.asc`),
   ]);
 
-  const tombs = await syncPullTombstones(conf, since);
+  const tombs = await syncPullTombstones(conf, sincePurges);
   const folders = await db.folders.toArray();
-  const folderResult = await syncPullFolders(remoteFolders, folders, since);
-  const noteResult = await syncPullNotes(conf, remoteNotes, folders, since, onProgress);
+  const folderResult = await syncPullFolders(remoteFolders, folders, sinceFolders);
+  const noteResult = await syncPullNotes(conf, remoteNotes, folders, sinceNotes, onProgress);
 
-  conf.lastPullAt = Math.max(tombs.watermark, folderResult.watermark, noteResult.watermark);
+  conf.lastPullPurges = tombs.watermark;
+  conf.lastPullFolders = folderResult.watermark;
+  conf.lastPullNotes = noteResult.watermark;
   return tombs.changed + folderResult.changed + noteResult.changed;
 };
 
-const syncPushBlobs = async (conf, note, uploaded, onProgress) => {
+const syncPushBlobs = async (conf, note, onProgress) => {
   let content = note.content || '';
   const metas = [];
 
@@ -293,13 +330,13 @@ const syncPushBlobs = async (conf, note, uploaded, onProgress) => {
       content = content.replace(token, '');
       continue;
     }
-    if (!uploaded.has(record.sha256)) {
+    if (!uploadedShas.has(record.sha256)) {
       const exists = await sbObjectExists(conf, `blobs/${record.sha256}`);
       if (!exists) {
         onProgress(`첨부 올리는 중... ${formatBytes(record.size || record.blob.size)}`);
         await sbUpload(conf, `blobs/${record.sha256}`, record.blob);
       }
-      uploaded.add(record.sha256);
+      uploadedShas.add(record.sha256);
     }
     metas.push({
       sha: record.sha256,
@@ -320,7 +357,9 @@ const syncPush = async (conf, onProgress) => {
   const startedAt = Date.now();
 
   const folders = (await db.folders.toArray()).filter((row) => rowVersion(row) > since);
-  const notes = (await db.notes.toArray()).filter((row) => rowVersion(row) > since);
+  const notes = (await db.notes.toArray()).filter(
+    (row) => rowVersion(row) > since && !row.pullPending
+  );
   if (!folders.length && !notes.length) {
     conf.lastPushAt = startedAt;
     return 0;
@@ -328,16 +367,16 @@ const syncPush = async (conf, onProgress) => {
 
   onProgress('보내는 중...');
   const folderRows = folders.map((folder) => ({
-    created_at: folder.createdAt,
+    uid: folder.uid,
     name: folder.name,
     order: folder.order || 0,
     pinned: !!folder.pinned,
+    created_at: folder.createdAt,
     deleted_at: folder.deletedAt || null,
     updated_at: rowVersion(folder),
   }));
   await sbUpsert(conf, 'folders', folderRows);
 
-  const uploaded = new Set(conf.uploaded || []);
   const noteRows = [];
 
   for (const note of notes) {
@@ -345,15 +384,16 @@ const syncPush = async (conf, onProgress) => {
     if (note.folderId != null) {
       folder = await db.folders.get(note.folderId);
     }
-    const { content, metas } = await syncPushBlobs(conf, note, uploaded, onProgress);
+    const { content, metas } = await syncPushBlobs(conf, note, onProgress);
     noteRows.push({
-      created_at: note.createdAt,
-      folder_created_at: folder ? folder.createdAt : null,
+      uid: note.uid,
+      folder_uid: folder ? folder.uid : null,
       content,
       blobs: metas,
       source_url: note.sourceUrl || null,
       source_title: note.sourceTitle || null,
       pinned: !!note.pinned,
+      created_at: note.createdAt,
       edited_at: note.editedAt || null,
       deleted_at: note.deletedAt || null,
       updated_at: rowVersion(note),
@@ -361,7 +401,6 @@ const syncPush = async (conf, onProgress) => {
   }
 
   await sbUpsert(conf, 'notes', noteRows);
-  conf.uploaded = [...uploaded];
   conf.lastPushAt = startedAt;
   return noteRows.length + folderRows.length;
 };

@@ -11,26 +11,40 @@ db.version(1).stores({
   blobs: '++id, &sha256',
 });
 
+db.version(2)
+  .stores({
+    folders: '++id, &uid, order, deletedAt',
+    notes: '++id, &uid, folderId, createdAt, deletedAt',
+    blobs: '++id, &sha256',
+  })
+  .upgrade(async (tx) => {
+    await tx.table('notes').clear();
+    await tx.table('folders').clear();
+    await tx.table('blobs').clear();
+  });
+
 let notePurgedHook = null;
+
+const newUid = () => crypto.randomUUID();
 
 const touch = (patch) => ({ ...patch, updatedAt: Date.now() });
 
 const ensureInbox = async () => {
-  const count = await db.folders.count();
-  if (count === 0) {
-    const now = Date.now();
-    return db.folders.add({
-      name: 'Inbox',
-      order: 0,
-      pinned: true,
-      createdAt: now,
-      deletedAt: null,
-      updatedAt: now,
-    });
-  }
   const folders = await db.folders.toArray();
   const first = folders.find((folder) => folder.deletedAt == null);
-  return first ? first.id : null;
+  if (first) {
+    return first.id;
+  }
+  const now = Date.now();
+  return db.folders.add({
+    uid: newUid(),
+    name: 'Inbox',
+    order: 0,
+    pinned: true,
+    createdAt: now,
+    deletedAt: null,
+    updatedAt: now,
+  });
 };
 
 const getActiveFolders = async () => {
@@ -58,6 +72,7 @@ const createFolder = async (name) => {
   const maxOrder = folders.reduce((max, folder) => Math.max(max, folder.order || 0), -1);
   const now = Date.now();
   return db.folders.add({
+    uid: newUid(),
     name: name.trim(),
     order: maxOrder + 1,
     pinned: false,
@@ -93,6 +108,7 @@ const createNote = ({
 }) => {
   const now = Date.now();
   return db.notes.add({
+    uid: newUid(),
     folderId,
     content: content || '',
     blobIds,
@@ -117,10 +133,8 @@ const softDeleteNote = (id) => db.notes.update(id, touch({ deletedAt: Date.now()
 const restoreNote = (id) => db.notes.update(id, touch({ deletedAt: null }));
 
 const getTrash = async () => {
-  const notes = await db.notes.toArray();
-  return notes
-    .filter((note) => note.deletedAt != null)
-    .sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
+  const notes = await db.notes.where('deletedAt').above(0).toArray();
+  return notes.sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
 };
 
 const purgeNote = async (id) => {

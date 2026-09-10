@@ -19,27 +19,29 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-const deliverCapture = async (message, tabId) => {
+const deliverCapture = (message, tabId) => {
   message.at = Date.now();
-  await chrome.storage.session.set({ pendingCapture: message });
-  try {
-    await chrome.runtime.sendMessage(message);
-    setTimeout(async () => {
-      const { pendingCapture } = await chrome.storage.session.get('pendingCapture');
-      if (pendingCapture && pendingCapture.at === message.at) {
-        await chrome.storage.session.remove('pendingCapture');
-      }
-    }, 1500);
-  } catch (err) {
-    if (tabId == null) {
-      return;
-    }
-    try {
-      await chrome.sidePanel.open({ tabId });
-    } catch (openErr) {
-      console.debug('side panel open failed', openErr);
-    }
+
+  if (tabId != null) {
+    chrome.sidePanel.open({ tabId }).catch((err) => {
+      console.debug('side panel open failed', err);
+    });
   }
+
+  return (async () => {
+    await chrome.storage.session.set({ pendingCapture: message });
+    try {
+      await chrome.runtime.sendMessage(message);
+      setTimeout(async () => {
+        const { pendingCapture } = await chrome.storage.session.get('pendingCapture');
+        if (pendingCapture && pendingCapture.at === message.at) {
+          await chrome.storage.session.remove('pendingCapture');
+        }
+      }, 1500);
+    } catch (err) {
+      console.debug('capture queued for panel startup', err);
+    }
+  })();
 };
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -61,14 +63,11 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 });
 
-chrome.commands.onCommand.addListener(async (command) => {
-  if (command !== 'capture-page') {
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (command !== 'capture-page' || !tab) {
     return;
   }
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab) {
-    deliverCapture({ type: 'capture', kind: 'page', url: tab.url, title: tab.title }, tab.id);
-  }
+  deliverCapture({ type: 'capture', kind: 'page', url: tab.url, title: tab.title }, tab.id);
 });
 
 let offscreenPending = null;

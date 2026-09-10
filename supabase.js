@@ -7,32 +7,34 @@ const SB_BUCKET = 'memo';
 
 const SB_SCHEMA = `
 create table if not exists folders (
-  created_at bigint primary key,
+  uid        text primary key,
   name       text not null,
   "order"    int  default 0,
   pinned     boolean default false,
+  created_at bigint not null,
   deleted_at bigint,
   updated_at bigint not null
 );
 
 create table if not exists notes (
-  created_at        bigint primary key,
-  folder_created_at bigint,
-  content           text  default '',
-  blobs             jsonb default '[]'::jsonb,
-  source_url        text,
-  source_title      text,
-  pinned            boolean default false,
-  edited_at         bigint,
-  deleted_at        bigint,
-  updated_at        bigint not null
+  uid          text primary key,
+  folder_uid   text,
+  content      text  default '',
+  blobs        jsonb default '[]'::jsonb,
+  source_url   text,
+  source_title text,
+  pinned       boolean default false,
+  created_at   bigint not null,
+  edited_at    bigint,
+  deleted_at   bigint,
+  updated_at   bigint not null
 );
 
 -- 영구 삭제 표식. notes에서 행이 없어진 사실은 받기 쪽에서 알 수 없으므로
--- "이 created_at은 영구 삭제됐다"를 따로 남긴다. 다른 PC가 이걸 보고 지운다.
+-- "이 uid는 영구 삭제됐다"를 따로 남긴다. 다른 PC가 이걸 보고 지운다.
 create table if not exists purges (
-  created_at bigint primary key,
-  purged_at  bigint not null
+  uid       text primary key,
+  purged_at bigint not null
 );
 
 create index if not exists purges_purged_at_idx  on purges  (purged_at);
@@ -68,6 +70,8 @@ grant execute on function public.usage_stats() to service_role;
 alter table folders enable row level security;
 alter table notes   enable row level security;
 alter table purges  enable row level security;
+
+notify pgrst, 'reload schema';
 `;
 
 const SB_PLANS = {
@@ -118,7 +122,9 @@ const sbProvision = async (token, onProgress = () => {}) => {
   const projects = (await sbMgmt(token, '/projects')) || [];
   let project = projects.find((item) => item.name === SB_PROJECT_NAME);
 
+  let dbPass = null;
   if (!project) {
+    dbPass = `${crypto.randomUUID()}aA1!`;
     onProgress('프로젝트 만드는 중... (1~2분 걸립니다)');
     project = await sbMgmt(token, '/projects', {
       method: 'POST',
@@ -126,7 +132,7 @@ const sbProvision = async (token, onProgress = () => {}) => {
         name: SB_PROJECT_NAME,
         organization_id: orgs[0].id,
         region: SB_REGION,
-        db_pass: `${crypto.randomUUID()}aA1!`,
+        db_pass: dbPass,
       }),
     });
   }
@@ -156,7 +162,24 @@ const sbProvision = async (token, onProgress = () => {}) => {
     throw new Error('service_role 키를 받지 못했습니다.');
   }
 
-  return { url: `https://${ref}.supabase.co`, key: serviceKey.api_key };
+  const conf = { url: `https://${ref}.supabase.co`, key: serviceKey.api_key, dbPass };
+
+  onProgress('테이블 반영 기다리는 중...');
+  let ready = false;
+  for (let attempt = 0; attempt < 20 && !ready; attempt++) {
+    ready = await sbRest(conf, '/notes?limit=0').then(
+      () => true,
+      () => false
+    );
+    if (!ready) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+  if (!ready) {
+    throw new Error('테이블이 아직 반영되지 않았습니다. 잠시 후 다시 연결해 주세요.');
+  }
+
+  return conf;
 };
 
 const sbHeaders = (conf, extra = {}) => ({
@@ -177,7 +200,7 @@ const sbUpsert = (conf, table, rows) => {
   if (!rows.length) {
     return Promise.resolve(null);
   }
-  return sbRest(conf, `/${table}?on_conflict=created_at`, {
+  return sbRest(conf, `/${table}?on_conflict=uid`, {
     method: 'POST',
     headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
     body: JSON.stringify(rows),

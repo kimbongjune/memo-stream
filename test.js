@@ -355,4 +355,450 @@ assert.ok(!fs.existsSync('i18n.js'), 'i18n.js 는 없어야 한다');
 assert.ok(manifest.default_locale === undefined, 'default_locale 은 없어야 한다');
 assert.ok(/[가-힣]/.test(manifest.name), 'manifest 이름이 실제 문구여야 한다');
 
-console.log('ok — 모든 체크 통과');
+/* --- 10. 동기화 실제 동작 ---
+ *
+ * 여기까지는 소스를 정규식으로 훑는 검사뿐이라, uid 마이그레이션처럼 기본키가
+ * 통째로 바뀌어도 전부 통과했다. 아래는 sync.js를 가짜 db/REST 위에서 실제로
+ * 돌려 본다. */
+
+const loadSync = (env) => {
+  const names = Object.keys(env);
+  const factory = new Function(
+    ...names,
+    sources.sync + '\nreturn { syncPull, syncPush, syncPullNotes, rowVersion };'
+  );
+  return factory(...names.map((name) => env[name]));
+};
+
+const fakeTable = (rows = []) => {
+  let nextId = rows.reduce((max, row) => Math.max(max, row.id || 0), 0) + 1;
+  return {
+    rows,
+    toArray: async () => rows.map((row) => ({ ...row })),
+    get: async (id) => rows.find((row) => row.id === id),
+    add: async (row) => {
+      const id = nextId++;
+      rows.push({ ...row, id });
+      return id;
+    },
+    update: async (id, patch) => {
+      const target = rows.find((row) => row.id === id);
+      Object.assign(target, patch);
+      return 1;
+    },
+    delete: async (id) => {
+      rows.splice(rows.findIndex((row) => row.id === id), 1);
+    },
+    where: (field) => ({
+      equals: (value) => ({
+        first: async () => rows.find((row) => row[field] === value),
+        toArray: async () => rows.filter((row) => row[field] === value),
+      }),
+    }),
+  };
+};
+
+const syncEnv = ({ notes = [], folders = [], blobs = [], download, rest }) => {
+  const db = { notes: fakeTable(notes), folders: fakeTable(folders), blobs: fakeTable(blobs) };
+  const upserts = [];
+  return {
+    db,
+    upserts,
+    env: {
+      db,
+      state: { settings: { sb: {}, purgeQueue: [] }, view: 'settings' },
+      saveSettings: async () => {},
+      renderNotes: async () => {},
+      ensureInbox: async () => 1,
+      notePurgedHook: null,
+      console: { warn() {}, error() {}, debug() {} },
+      formatBytes: () => '0 B',
+      SB_BUCKET: 'memo',
+      sbHeaders: () => ({}),
+      fetch: async () => ({ ok: true, json: async () => [] }),
+      sbRest: async (conf, path) => (rest ? rest(path) : []),
+      sbUpsert: async (conf, table, rows) => {
+        upserts.push({ table, rows });
+        return null;
+      },
+      sbObjectExists: async () => true,
+      sbUpload: async () => {},
+      sbDownload: download || (async () => new Blob([1])),
+      getBlob: async (id) => db.blobs.rows.find((row) => row.id === id),
+      findBlobBySha256: async (sha) => db.blobs.rows.find((row) => row.sha256 === sha),
+      incrementRefCount: async () => {},
+      decrementRefCount: async () => {},
+    },
+  };
+};
+
+const remoteNote = (over = {}) => ({
+  uid: 'note-a',
+  folder_uid: null,
+  content: '본문',
+  blobs: [],
+  source_url: null,
+  source_title: null,
+  pinned: false,
+  created_at: 1000,
+  edited_at: null,
+  deleted_at: null,
+  updated_at: 5000,
+  ...over,
+});
+
+(async () => {
+  /* 첨부를 받지 못하면 워터마크를 올리면 안 된다. 올리면 updated_at=gt.<워터마크>
+   * 쿼리에서 그 행이 영영 빠져 첨부가 이 기기에서 사라진다. */
+  {
+    const { db, env } = syncEnv({
+      download: async () => {
+        throw new Error('offline');
+      },
+    });
+    const sync = loadSync(env);
+    const row = remoteNote({ blobs: [{ sha: 'deadbeef', mime: 'image/webp', size: 1 }] });
+    const result = await sync.syncPullNotes({}, [row], [], 0, () => {});
+
+    assert.strictEqual(result.watermark, 0, '첨부 실패 행은 워터마크를 올리지 않는다');
+    assert.strictEqual(db.notes.rows.length, 1, '본문은 그래도 저장한다');
+    assert.strictEqual(db.notes.rows[0].pullPending, true, '재시도 표식을 남긴다');
+  }
+
+  /* 다음 회차에 같은 행이 다시 와도 건너뛰지 않고 재시도해야 한다. */
+  {
+    const { db, env } = syncEnv({
+      notes: [{ id: 1, uid: 'note-a', updatedAt: 5000, pullPending: true, blobIds: [] }],
+    });
+    const sync = loadSync(env);
+    const row = remoteNote({ blobs: [{ sha: 'deadbeef', mime: 'image/webp', size: 1 }] });
+    const result = await sync.syncPullNotes({}, [row], [], 0, () => {});
+
+    assert.strictEqual(result.changed, 1, 'pullPending 행은 버전이 같아도 다시 처리한다');
+    assert.strictEqual(db.notes.rows[0].pullPending, null, '이번엔 받았으니 표식을 지운다');
+    assert.strictEqual(result.watermark, 5000, '성공했으니 워터마크를 올린다');
+  }
+
+  /* 첨부가 빠진 행을 올리면 원격 blobs 목록을 빈 배열로 덮어써서
+   * 다른 PC에서도 첨부가 사라진다. push에서 빼야 한다. */
+  {
+    const { env, upserts } = syncEnv({
+      notes: [
+        { id: 1, uid: 'ok', createdAt: 1, updatedAt: 100, blobIds: [], content: '' },
+        { id: 2, uid: 'stalled', createdAt: 2, updatedAt: 100, blobIds: [], pullPending: true },
+      ],
+    });
+    const sync = loadSync(env);
+    await sync.syncPush({ lastPushAt: 0 }, () => {});
+
+    const noteUpsert = upserts.find((item) => item.table === 'notes');
+    assert.deepStrictEqual(
+      noteUpsert.rows.map((row) => row.uid),
+      ['ok'],
+      'pullPending 메모는 올리지 않는다'
+    );
+  }
+
+  /* 워터마크는 테이블마다 따로 간다. notes.updated_at은 글 쓴 기기 시계,
+   * purges.purged_at은 삭제를 올린 기기 시계라 하나로 묶으면 어긋난다. */
+  {
+    const { env } = syncEnv({
+      rest: (path) => {
+        if (path.startsWith('/notes')) return [remoteNote({ updated_at: 9000 })];
+        return [];
+      },
+    });
+    const sync = loadSync(env);
+    const conf = {};
+    await sync.syncPull(conf, () => {});
+
+    assert.strictEqual(conf.lastPullNotes, 9000, 'notes 워터마크는 올라간다');
+    assert.strictEqual(conf.lastPullPurges, 0, 'purges 워터마크는 notes에 끌려가지 않는다');
+    assert.strictEqual(conf.lastPullAt, undefined, '합쳐 쓰던 워터마크는 더 이상 없다');
+  }
+
+  /* uid가 기본키다. 밀리초를 키로 쓰면 같은 배치에 중복이 생겨
+   * ON CONFLICT가 21000으로 죽고 동기화가 영구히 멈췄다. */
+  assert.ok(/on_conflict=uid/.test(sources.supabase), 'upsert 충돌 기준은 uid다');
+  assert.ok(
+    !/on_conflict=created_at/.test(sources.supabase),
+    'created_at을 충돌 기준으로 쓰면 안 된다'
+  );
+  assert.ok(/uid\s+text primary key/.test(sources.supabase), '원격 기본키는 uid다');
+  for (const table of ['folders', 'notes']) {
+    assert.ok(
+      new RegExp(`create table if not exists ${table} \\(\\s*\\n\\s*uid`).test(sources.supabase),
+      `${table} 는 uid로 시작해야 한다`
+    );
+  }
+
+  const loadHash = () => {
+    const stored = [];
+    const factory = new Function(
+      'db',
+      'findBlobBySha256',
+      'createImageBitmap',
+      'document',
+      read('hash.js') + '\nreturn { isAnimatedImage, processImageFile };'
+    );
+    const api = factory(
+      {
+        blobs: {
+          add: async (rec) => {
+            stored.push(rec);
+            return stored.length;
+          },
+          update: async () => {},
+          get: async () => null,
+        },
+      },
+      async () => null,
+      () => {
+        throw new Error('createImageBitmap 을 부르면 첫 프레임만 남는다');
+      },
+      {}
+    );
+    return { stored, api };
+  };
+
+  const fakeFile = (type, head = []) => {
+    const bytes = new Uint8Array(head);
+    return {
+      type,
+      name: 'x',
+      size: bytes.length,
+      arrayBuffer: async () => bytes.buffer,
+      slice: () => ({ arrayBuffer: async () => bytes.buffer }),
+    };
+  };
+
+  const webpHead = (animated) => {
+    const bytes = new Array(21).fill(0);
+    'RIFF'.split('').forEach((c, i) => (bytes[i] = c.charCodeAt(0)));
+    'WEBP'.split('').forEach((c, i) => (bytes[8 + i] = c.charCodeAt(0)));
+    'VP8X'.split('').forEach((c, i) => (bytes[12 + i] = c.charCodeAt(0)));
+    bytes[20] = animated ? 0x02 : 0x00;
+    return bytes;
+  };
+
+  {
+    const { api } = loadHash();
+    const gif = (frames) => {
+      const bytes = [];
+      'GIF89a'.split('').forEach((c) => bytes.push(c.charCodeAt(0)));
+      for (let n = 0; n < frames; n++) {
+        bytes.push(0x21, 0xf9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00);
+      }
+      return bytes;
+    };
+
+    assert.strictEqual(
+      await api.isAnimatedImage(fakeFile('image/gif', gif(3))),
+      true,
+      '여러 프레임 GIF 는 움직이는 이미지다'
+    );
+    assert.strictEqual(
+      await api.isAnimatedImage(fakeFile('image/gif', gif(1))),
+      false,
+      '한 프레임 GIF 는 평소대로 webp 로 줄인다'
+    );
+    assert.strictEqual(
+      await api.isAnimatedImage(fakeFile('image/webp', webpHead(true))),
+      true,
+      '움직이는 WebP 를 잡는다'
+    );
+    assert.strictEqual(
+      await api.isAnimatedImage(fakeFile('image/webp', webpHead(false))),
+      false,
+      '정지 WebP 는 평소대로 변환'
+    );
+    assert.strictEqual(
+      await api.isAnimatedImage(fakeFile('image/png')),
+      false,
+      'PNG 는 평소대로 변환'
+    );
+  }
+
+  {
+    const panelSrc = read('sidepanel.js');
+    const body = fnBody(panelSrc, 'storeAttachment');
+    assert.ok(
+      /isAnimatedImage\(file\)[\s\S]*isVideo = true/.test(body),
+      '움직이는 이미지는 영상 경로로 보내 ffmpeg 로 돌린다'
+    );
+    assert.ok(
+      /loop: true/.test(body),
+      'GIF 에서 온 영상은 loop 로 표시해 둔다'
+    );
+    const mdSrc = read('markdown.js');
+    assert.ok(
+/loop autoplay muted playsinline/.test(mdSrc),
+      'loop 영상은 컨트롤 없이 자동 반복 재생한다'
+    );
+    for (const attr of ['loop', 'autoplay', 'muted', 'playsinline']) {
+      assert.ok(
+        new RegExp(`ADD_ATTR:[^\\]]*'${attr}'`).test(mdSrc),
+        `DOMPurify 가 ${attr} 를 지우면 안 된다`
+      );
+    }
+    assert.ok(
+      /'-pix_fmt', 'yuv420p'/.test(read('offscreen.js')),
+      'GIF 변환 결과가 어디서나 재생되려면 yuv420p 가 필요하다'
+    );
+  }
+
+  {
+    const offscreen = read('offscreen.js');
+    assert.ok(!/'in'|'out\.mp4'/.test(offscreen), 'ffmpeg 파일명을 고정하면 안 된다');
+    assert.ok(/runExclusive/.test(offscreen), '압축 작업은 한 번에 하나만 돈다');
+  }
+
+  {
+    const panel = read('sidepanel.js');
+    assert.ok(
+      /chrome\.downloads\.onChanged/.test(panel),
+      '내보내기 URL 은 다운로드가 끝난 뒤 revoke 한다'
+    );
+    assert.ok(
+      !/setTimeout\(\(\) => URL\.revokeObjectURL\(url\), 10000\);\n\s*state\.settings\.lastExportAt/.test(
+        panel
+      ),
+      '10초 타이머로 revoke 하면 큰 파일이 끊긴다'
+    );
+    assert.ok(/NOTE_PAGE_SIZE/.test(panel), '메모 목록은 페이지 단위로 그린다');
+    assert.ok(
+      /if \(!input\.value\) \{\n\s*return;/.test(panel),
+      '빈 작성창에서는 Tab 이 포커스를 넘겨야 한다'
+    );
+    assert.ok(/select\.selectedIndex < 0/.test(panel), 'option 이 없으면 빈칸으로 두지 않는다');
+  }
+
+  {
+    const backupSrcAsync = read('backup.js');
+    assert.ok(!/fflate\.(zip|unzip)Sync/.test(backupSrcAsync), 'zip 은 동기로 돌리지 않는다');
+    assert.ok(/fflate\.zip\(/.test(backupSrcAsync), 'fflate 비동기 API 를 쓴다');
+  }
+
+  {
+    const syncSrc = read('sync.js');
+    assert.ok(!/conf\.uploaded/.test(syncSrc), 'uploaded 목록을 settings 에 쌓지 않는다');
+    assert.ok(
+      !/blobs=cs\./.test(syncSrc),
+      '원격 첨부 정리는 오브젝트마다 쿼리하지 않는다'
+    );
+  }
+
+  assert.ok(
+    /where\('deletedAt'\)/.test(sources.db),
+    'deletedAt 인덱스를 만들었으면 휴지통 조회에 써야 한다'
+  );
+  assert.ok(
+    manifest.action.default_title === 'Memo Stream 열기',
+    '툴바 제목은 실제 동작과 맞아야 한다'
+  );
+
+  {
+    const panel = read('sidepanel.js');
+
+    assert.ok(
+      /addEventListener\('load', apply/.test(panel),
+      '이미지가 늦게 로드되면 높이가 늘어나므로 그때 다시 맨 아래로 붙어야 한다'
+    );
+    const mdText = read('markdown.js');
+    assert.strictEqual(
+      (mdText.match(/URL\.createObjectURL/g) || []).length,
+      1,
+      '렌더마다 새 URL 을 만들면 같은 사진이 매번 다시 로드돼 깜빡인다'
+    );
+    assert.ok(/blobUrlCache\.get\(key\)/.test(mdText), '첨부 URL 은 blob 별로 캐시해 재사용한다');
+    for (const fn of ['renderNoteBubble', 'renderAttachChips']) {
+      assert.ok(
+        !/createObjectURL/.test(fnBody(panel, fn)),
+        `${fn} 이 따로 URL 을 만들면 캐시를 우회해 또 깜빡인다`
+      );
+    }
+    assert.ok(
+      !/main\.scrollTop = previousTop/.test(panel),
+      '숨겨진 목록의 scrollTop 은 0 으로 눌리므로 그 값을 복원하면 안 된다'
+    );
+    assert.ok(
+      /main\.addEventListener\('scroll'/.test(panel),
+      '맨 아래에 있었는지는 렌더 순간이 아니라 스크롤 이벤트로 계속 추적한다'
+    );
+    assert.ok(
+      /await renderNotes\(null, true\)/.test(fnBody(panel, 'sendNote')),
+      '메모를 보내면 맨 아래로 내려가야 한다'
+    );
+    assert.ok(
+      !/scrollKey = JSON\.stringify\(\[[^\]]*query/.test(panel),
+      '검색어 한 글자마다 스크롤을 움직이면 안 된다'
+    );
+    assert.strictEqual(
+      (panel.match(/search-toggle'\)\.classList\.remove\('active'\)/g) || []).length,
+      1,
+      '검색 닫기는 closeSearch 한 곳에서만 처리한다'
+    );
+    assert.ok(
+      (panel.match(/closeSearch\(\)/g) || []).length >= 3,
+      '검색을 닫는 모든 경로가 closeSearch 를 거쳐야 한다'
+    );
+
+    const mdSrc = read('markdown.js');
+    assert.ok(
+      /width="\$\{record\.width\}" height="\$\{record\.height\}"/.test(mdSrc),
+      '이미지 크기를 미리 박아야 로드되며 레이아웃이 튀지 않는다'
+    );
+  }
+
+  {
+    const panel = read('sidepanel.js');
+    const body = fnBody(panel, 'renderNotes');
+
+    assert.ok(
+      !/innerHTML/.test(body),
+      '목록을 먼저 비우면 await 사이마다 빈 화면이 그려지고 스크롤이 0으로 튄다'
+    );
+    assert.ok(
+      /replaceChildren\(frame\)/.test(body),
+      '화면 밖에서 다 만든 뒤 한 번에 갈아끼워야 한다'
+    );
+    assert.strictEqual(
+      (body.match(/list\.(appendChild|innerHTML|replaceChildren|append)/g) || []).length,
+      1,
+      '살아 있는 목록을 건드리는 지점은 갈아끼우는 한 번뿐이어야 한다'
+    );
+  }
+
+  {
+    const panel = read('sidepanel.js');
+    const css = read('sidepanel.css');
+    const body = fnBody(panel, 'renderNotes');
+
+    assert.ok(
+      !/scroll-behavior:\s*smooth/.test(css),
+      'scroll-behavior: smooth 면 scrollTop 대입마다 화면이 애니메이션으로 굴러간다'
+    );
+    assert.ok(
+      /bubbleCache\.get\(note\.id\)/.test(body),
+      '안 바뀐 메모는 말풍선을 다시 만들지 않고 그대로 쓴다'
+    );
+    assert.ok(
+      /folderNames\.get\(note\.folderId\)/.test(body),
+      '폴더 이름이 바뀌면 캐시된 말풍선도 다시 만들어야 한다'
+    );
+    assert.ok(
+      /const searching = active && \(needle\.length > 0/.test(body),
+      '검색창만 열고 아무것도 안 쳤으면 목록이 바뀌면 안 된다'
+    );
+    assert.ok(
+      /savedTop = \$\('#main'\)\.scrollTop/.test(fnBody(panel, 'render')),
+      '설정으로 나갈 때 위치를 기억해야 돌아왔을 때 그 자리다'
+    );
+  }
+
+  console.log('ok — 모든 체크 통과');
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+
