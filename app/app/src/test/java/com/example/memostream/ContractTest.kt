@@ -651,6 +651,14 @@ class ContractTest {
             body.contains("state.attach(uris)")
         )
         assertTrue("URI 가 없으면 그대로 넘긴다", body.contains("if (uris.isEmpty()) {"))
+        assertTrue(
+            "같은 첨부를 두 번 붙이면 blob id 가 같아 LazyRow 키가 겹친다",
+            body.contains("items(draft, key = {") && body.contains("it.key")
+        )
+        val state = source("ui/AppState.kt")
+        assertTrue("칩마다 고유 키", state.contains("data class DraftRef(val key: Long"))
+        assertTrue("키를 증가시켜 발급", state.contains("draftKeys += 1"))
+        assertTrue("지울 때도 키로 하나만", state.contains("it.key == ref.key"))
     }
 
     @Test

@@ -34,7 +34,7 @@ data class SearchState(
     val kind: String = "",
 )
 
-data class DraftRef(val id: Long, val markdown: String)
+data class DraftRef(val key: Long, val id: Long, val markdown: String)
 
 data class NotesUi(
     val folders: List<Folder> = emptyList(),
@@ -159,6 +159,8 @@ class AppState(app: Application) : AndroidViewModel(app) {
 
     val trash: StateFlow<List<Note>> = repo.trashNotes
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    private var draftKeys = 0L
 
     private val _draft = MutableStateFlow<List<DraftRef>>(emptyList())
     val draft: StateFlow<List<DraftRef>> = _draft.asStateFlow()
@@ -351,7 +353,8 @@ class AppState(app: Application) : AndroidViewModel(app) {
                         record.mime.startsWith("video/") -> "![${picked.name}](blob:$id)"
                         else -> "[${picked.name.replace(Regex("[\\[\\]]"), "")}](blob:$id)"
                     }
-                    _draft.value = _draft.value + DraftRef(id, markdown)
+                    draftKeys += 1
+                    _draft.value = _draft.value + DraftRef(draftKeys, id, markdown)
                     done++
                 } catch (err: Exception) {
                     problem = "첨부 저장에 실패했습니다"
@@ -366,7 +369,7 @@ class AppState(app: Application) : AndroidViewModel(app) {
 
     fun removeDraft(ref: DraftRef) {
         _draft.value = _draft.value.filterNot {
-            it.id == ref.id
+            it.key == ref.key
         }
         viewModelScope.launch {
             withContext(Dispatchers.IO) {

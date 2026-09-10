@@ -348,7 +348,7 @@ private fun Composer(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 items(draft, key = {
-                    it.id
+                    it.key
                 }) { ref ->
                     DraftChip(state, ref)
                 }
